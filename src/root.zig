@@ -2,6 +2,8 @@ const std = @import("std");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
+const sqlite = @import("zqlite");
+
 pub const TopLevelPath = struct {
     path: [:0]const u8,
     device: ?[:0]const u8 = null,
@@ -45,7 +47,6 @@ pub fn get_top_level_paths(alloc: Allocator, scratch: Allocator) ![]TopLevelPath
             if (std.mem.startsWith(u8, path, "/boot")) {
                 continue;
             }
-            std.debug.print("LINE = '{s}'\n", .{line});
             try file_list.append(.{
                 .path = try alloc.dupeZ(u8, path),
                 .device = try alloc.dupeZ(u8, device),
@@ -54,3 +55,43 @@ pub fn get_top_level_paths(alloc: Allocator, scratch: Allocator) ![]TopLevelPath
     }
     return file_list.items;
 }
+
+pub const DB = struct {
+    pub const FileKind = enum(u8) {
+        dir = 0,
+        file = 1,
+        link_soft = 2,
+        link_hard = 3,
+    };
+
+    pub fn connect(alloc: Allocator) !sqlite.Conn {
+        const db_name = "chonk.sqlite3.db";
+
+        const path = if (@import("builtin").mode == .Debug) dir: {
+            const dir = comptime std.fs.cwd();
+            var buf: [std.fs.max_path_bytes]u8 = undefined;
+            const path = try dir.realpath(".", &buf);
+            break :dir try std.fs.path.joinZ(alloc, &.{
+                path,
+                db_name,
+            });
+        } else {
+            unreachable;
+        };
+
+        const flags = sqlite.OpenFlags.Create | sqlite.OpenFlags.EXResCode;
+        return sqlite.open(path, flags);
+    }
+
+    pub fn ensure_init(conn: sqlite.Conn) !void {
+        try conn.execNoArgs(
+            \\create table if not exists paths (
+            \\    id integer primary key autoincrement,
+            \\    path text not null,
+            \\    size_bytes integer not null default 0,
+            \\    type int check(type in (0, 1, 2, 3)) not null,
+            \\    parent_id integer references paths(id) default null
+            \\)
+        );
+    }
+};

@@ -1,5 +1,6 @@
 const std = @import("std");
 const lib = @import("root.zig");
+const Thread = std.Thread;
 
 const rl = @import("raylib");
 const rgui = @import("raygui");
@@ -27,15 +28,21 @@ pub fn main() anyerror!void {
     var frame_arena = std.heap.ArenaAllocator.init(alloc_state);
     const frame_arena_alloc = frame_arena.allocator();
 
+    const conn = try lib.DB.connect(alloc_state);
+    try lib.DB.ensure_init(conn);
+
     const Page = union(enum) {
         select: struct {
-            paths: ?[]lib.TopLevelPath,
+            paths: ?[]lib.TopLevelPath = null,
         },
-        viewer: struct { path: [:0]const u8 },
+        viewer: struct {
+            path: [:0]const u8,
+            worker_thread: ?Thread = null,
+        },
     };
 
     var page_current: Page = .{
-        .select = .{ .paths = null },
+        .select = .{},
     };
 
     const font = try rl.getFontDefault();
@@ -44,13 +51,7 @@ pub fn main() anyerror!void {
     while (!rl.windowShouldClose()) { // Detect window close button or ESC key
         // TODO: max water mark
         defer _ = frame_arena.reset(.retain_capacity);
-        // Update
-        //----------------------------------------------------------------------------------
-        // TODO: Update your variables here
-        //----------------------------------------------------------------------------------
 
-        // Draw
-        //----------------------------------------------------------------------------------
         rl.beginDrawing();
         defer rl.endDrawing();
 
