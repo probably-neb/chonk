@@ -87,7 +87,7 @@ pub const DB = struct {
         try conn.execNoArgs(
             \\create table if not exists paths (
             \\    id integer primary key autoincrement,
-            \\    path text not null,
+            \\    path text not null UNIQUE,
             \\    size_bytes integer not null default 0,
             \\    type int check(type in (0, 1, 2, 3)) not null,
             \\    parent_id integer references paths(id) default null
@@ -99,14 +99,86 @@ pub const DB = struct {
         abs_path: []const u8,
         size_bytes: u64,
         kind: FileKind,
+
+        pub const fields = std.meta.fields(@This());
+        pub const field_type_array = blk: {
+            var array: [fields.len]type = undefined;
+            for (fields, 0..) |field, i| {
+                if (std.mem.eql(u8, field.name, "kind")) {
+                    array[i] = u8;
+                } else {
+                    array[i] = field.type;
+                }
+            }
+            break :blk array;
+        };
     };
+
+    const ENTRY_SAVE_BATCH_COUNT = 32;
+
+    pub fn entries_save_batch(conn: sqlite.Conn, batch: *const [ENTRY_SAVE_BATCH_COUNT]Entry) !void {
+        const BatchFlat = std.meta.Tuple(&(Entry.field_type_array ** ENTRY_SAVE_BATCH_COUNT));
+        var batch_flat: BatchFlat = undefined;
+
+        inline for (0..ENTRY_SAVE_BATCH_COUNT) |i| {
+            inline for (Entry.fields, 0..) |field, f| {
+                const batch_flat_field_name = std.fmt.comptimePrint("{d}", .{i * Entry.field_type_array.len + f});
+
+                if (comptime std.mem.eql(u8, field.name, "kind")) {
+                    @field(batch_flat, batch_flat_field_name) = @intFromEnum(batch[i].kind);
+                } else {
+                    @field(batch_flat, batch_flat_field_name) = @field(
+                        batch[i],
+                        field.name,
+                    );
+                }
+            }
+        }
+
+        inline for (batch_flat) |item| {
+            std.debug.print("\t{s}\n", .{@tagName(@typeInfo(@TypeOf(item)))});
+        }
+
+        const query = std.fmt.comptimePrint(
+            \\ INSERT INTO paths (path, size_bytes, type) values
+            \\ {s}{s}
+            \\ ON CONFLICT (path)
+            \\ DO UPDATE SET
+            \\      type = excluded.type,
+            \\      size_bytes = excluded.size_bytes;
+            \\
+        , .{
+            "((?), (?), (?)), " ** (DB.ENTRY_SAVE_BATCH_COUNT - 1),
+            "((?), (?), (?))",
+        });
+
+        try conn.exec(query, batch_flat);
+    }
+
+    pub fn entries_save_one(conn: sqlite.Conn, entry: Entry) !void {
+        try conn.exec(
+            \\ INSERT INTO paths (path, size_bytes, type) values
+            \\ ((?), (?), (?))
+            \\ ON CONFLICT (path)
+            \\ DO UPDATE SET
+            \\      type = excluded.type,
+            \\      size_bytes = excluded.size_bytes;
+            \\
+        , .{
+            entry.abs_path,
+            entry.size_bytes,
+            @as(u8, @intFromEnum(entry.kind)),
+        });
+    }
 };
 
-pub fn index_paths_starting_with(root_path: []const u8) !void {
+pub fn index_paths_starting_with(root_path: []const u8, mutex: *std.Thread.Mutex) !void {
     const fs = std.fs;
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const alloc = arena.allocator();
+
+    const conn = try DB.connect(std.heap.page_allocator);
 
     std.debug.assert(fs.path.isAbsolute(root_path));
 
@@ -118,18 +190,24 @@ pub fn index_paths_starting_with(root_path: []const u8) !void {
 
     try queue.append(root_dir);
 
-    const SAVE_BATCH_COUNT = 32;
-    var save_queue = try std.ArrayList(DB.Entry).initCapacity(alloc, SAVE_BATCH_COUNT * 2);
+    var save_queue = try std.ArrayList(DB.Entry).initCapacity(alloc, DB.ENTRY_SAVE_BATCH_COUNT * 2);
 
     _ = std.fs.Dir.Entry;
 
+    defer std.debug.print("worker thread go die\n", .{});
+
     while (queue.popOrNull()) |dir| {
+        if (mutex.tryLock()) {
+            // NOTE: maybe should save already done work first?
+            mutex.unlock();
+            return;
+        }
         var dir_iter = dir.iterate();
         while (dir_iter.next() catch null) |entry| {
             switch (entry.kind) {
                 .directory => {
                     std.debug.print("Found Path {s} TYPE=DIR\n", .{entry.name});
-                    const path = try alloc.dupe(u8, entry.name);
+                    const path = try dir.realpathAlloc(alloc, entry.name);
                     try save_queue.append(.{
                         .abs_path = path,
                         .size_bytes = 0,
@@ -138,10 +216,42 @@ pub fn index_paths_starting_with(root_path: []const u8) !void {
                 },
                 .file => {
                     std.debug.print("Found Path {s} TYPE=DIR\n", .{entry.name});
+                    const path = try dir.realpathAlloc(alloc, entry.name);
+                    const size = blk: {
+                        const file = try dir.openFile(entry.name, .{
+                            .mode = .read_only,
+                        });
+                        const size = (try file.stat()).size;
+                        break :blk size;
+                    };
+                    try save_queue.append(.{
+                        .abs_path = path,
+                        .size_bytes = size,
+                        .kind = .file,
+                    });
                 },
                 // TODO: links
                 else => continue,
             }
         }
+
+        while (save_queue.items.len >= DB.ENTRY_SAVE_BATCH_COUNT) {
+            const batch: *const [DB.ENTRY_SAVE_BATCH_COUNT]DB.Entry = &save_queue.items[0..DB.ENTRY_SAVE_BATCH_COUNT].*;
+            for (batch) |entry| {
+                try DB.entries_save_one(conn, entry);
+            }
+            try save_queue.replaceRange(0, DB.ENTRY_SAVE_BATCH_COUNT, &.{});
+        }
     }
+    while (save_queue.items.len >= DB.ENTRY_SAVE_BATCH_COUNT) {
+        const batch: *const [DB.ENTRY_SAVE_BATCH_COUNT]DB.Entry = &save_queue.items[0..DB.ENTRY_SAVE_BATCH_COUNT].*;
+        for (batch) |entry| {
+            try DB.entries_save_one(conn, entry);
+        }
+        try save_queue.replaceRange(0, DB.ENTRY_SAVE_BATCH_COUNT, &.{});
+    }
+    for (save_queue.items) |entry| {
+        try DB.entries_save_one(conn, entry);
+    }
+    return;
 }

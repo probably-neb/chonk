@@ -1,6 +1,7 @@
 const std = @import("std");
 const lib = @import("root.zig");
 const Thread = std.Thread;
+const c = @cImport(@cInclude("sqlite3.h"));
 
 const rl = @import("raylib");
 const rgui = @import("raygui");
@@ -30,6 +31,11 @@ pub fn main() anyerror!void {
 
     const conn = try lib.DB.connect(alloc_state);
     try lib.DB.ensure_init(conn);
+    if (c.sqlite3_config(c.SQLITE_CONFIG_LOG, error_log_callback, c.SQLITE_NULL) != c.SQLITE_OK) {
+        std.debug.print("WARN: Failed to setup db logging\n", .{});
+    }
+
+    var worker_thread_mutex = Thread.Mutex{};
 
     const Page = union(enum) {
         select: struct {
@@ -114,10 +120,15 @@ pub fn main() anyerror!void {
             },
             .viewer => |*viewer_data| frame: {
                 if (viewer_data.worker_thread == null) worker: {
-                    viewer_data.worker_thread = Thread.spawn(.{}, lib.index_paths_starting_with, .{viewer_data.path}) catch |err| {
+                    worker_thread_mutex.lock(); // FIXME: ensure no infinite wait
+                    const thread = Thread.spawn(.{}, lib.index_paths_starting_with, .{ viewer_data.path, &worker_thread_mutex }) catch |err| {
                         std.debug.print("ERROR: failed to spawn worker thread: {any}\n", .{err});
+                        worker_thread_mutex.unlock();
                         break :worker;
                     };
+                    thread.detach();
+
+                    viewer_data.worker_thread = thread;
                 }
                 const window_width = rl.getRenderWidth();
 
@@ -134,6 +145,8 @@ pub fn main() anyerror!void {
                         page_current = .{ .select = .{
                             .paths = null,
                         } };
+                        // tell worker thread to go die
+                        worker_thread_mutex.unlock();
                         break :frame;
                     }
                 }
@@ -167,4 +180,8 @@ pub fn main() anyerror!void {
         // Draw each file name in the list
         //----------------------------------------------------------------------------------
     }
+}
+
+fn error_log_callback(_: *allowzero anyopaque, error_code: c_int, msg: [*:0]const u8) callconv(.C) void {
+    std.debug.print("ERROR(SQLITE_LOG): {d} {s}\n", .{ error_code, msg });
 }
