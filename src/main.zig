@@ -26,11 +26,10 @@ pub fn main() anyerror!void {
 
     var frame_arena = std.heap.ArenaAllocator.init(alloc_state);
     const frame_arena_alloc = frame_arena.allocator();
-    _ = frame_arena_alloc;
 
     const Page = union(enum) {
         select: struct {
-            paths: ?[][:0]const u8,
+            paths: ?[]lib.TopLevelPath,
         },
         viewer: struct { path: [:0]const u8 },
     };
@@ -60,7 +59,7 @@ pub fn main() anyerror!void {
         switch (page_current) {
             .select => |*select_data| frame: {
                 if (select_data.paths == null) {
-                    select_data.paths = lib.get_top_level_paths(alloc_state) catch |err| {
+                    select_data.paths = lib.get_top_level_paths(alloc_state, frame_arena_alloc) catch |err| {
                         std.debug.print("ERROR: Failed to retrieve file paths: {any}\n", .{err});
                         break :frame;
                     };
@@ -95,16 +94,17 @@ pub fn main() anyerror!void {
                 rgui.guiSetStyle(.default, rgui.GuiDefaultProperty.text_size, path_font_size);
 
                 for (file_paths, 0..) |file, i| {
+                    const file_path = file.path;
                     const path_y = @as(f32, @floatFromInt(label_height + @as(i32, @intCast((i * path_height))))); // 30 pixels spacing between lines
                     if (rgui.guiButton(.{
                         .x = path_x,
                         .y = path_y,
                         .width = path_width,
                         .height = path_height,
-                    }, file) != 0) {
+                    }, file_path) != 0) {
                         page_current = .{
                             .viewer = .{
-                                .path = file,
+                                .path = file_path,
                             },
                         };
                         break :frame;
