@@ -28,8 +28,8 @@
             .hash = "12206cf18aea41dc1e61b697c36ef627752e84fe9a9362b800240fce7dea3665094d",
         },
         .zqlite = .{
-            .url = "git+https://github.com/karlseguin/zqlite.zig?ref=master#9101f7a731bb5fbd5df2d9fe9e3cd53091a39e76",
-            .hash = "1220045d9f75ff2f88d546f66f68d55425b2205d0932b6991410925f50fd180fa516",
+            .url = "git+https://github.com/probably-neb/zqlite?ref=master#89a251102cada1dc20a8425603d01e116cda3c17",
+            .hash = "12207efcce8a24ca2742962ecdbb09e1c0a9da6691fb3f82104381d966b0ed0aea68",
         },
     },
     .paths = .{
