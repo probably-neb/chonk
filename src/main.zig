@@ -24,11 +24,15 @@ pub fn main() anyerror!void {
 
     const alloc_state = std.heap.page_allocator;
 
+    var frame_arena = std.heap.ArenaAllocator.init(alloc_state);
+    const frame_arena_alloc = frame_arena.allocator();
+    _ = frame_arena_alloc;
+
     const Page = union(enum) {
         select: struct {
             paths: ?[][*:0]const u8,
         },
-        viewer: void,
+        viewer: struct { path: [*:0]const u8 },
     };
 
     var page_current: Page = .{
@@ -39,6 +43,8 @@ pub fn main() anyerror!void {
 
     // Main game loop
     while (!rl.windowShouldClose()) { // Detect window close button or ESC key
+        // TODO: max water mark
+        defer _ = frame_arena.reset(.retain_capacity);
         // Update
         //----------------------------------------------------------------------------------
         // TODO: Update your variables here
@@ -52,11 +58,11 @@ pub fn main() anyerror!void {
         rl.clearBackground(rl.Color.white);
 
         switch (page_current) {
-            .select => |*select_data| blk: {
+            .select => |*select_data| frame: {
                 if (select_data.paths == null) {
                     select_data.paths = lib.get_top_level_paths(alloc_state) catch |err| {
                         std.debug.print("ERROR: Failed to retrieve file paths: {any}\n", .{err});
-                        break :blk;
+                        break :frame;
                     };
                 }
                 const window_width = rl.getRenderWidth();
@@ -96,11 +102,52 @@ pub fn main() anyerror!void {
                         .width = path_width,
                         .height = path_height,
                     }, file) != 0) {
-                        std.debug.print("clicked {s}\n", .{file});
+                        page_current = .{
+                            .viewer = .{
+                                .path = file,
+                            },
+                        };
+                        break :frame;
                     }
                 }
             },
-            .viewer => {},
+            .viewer => |viewer_data| frame: {
+                const window_width = rl.getRenderWidth();
+
+                {
+                    const back_button_font_size = 32;
+                    rgui.guiSetStyle(.default, rgui.GuiDefaultProperty.text_size, back_button_font_size);
+
+                    if (rgui.guiButton(.{
+                        .x = 5,
+                        .y = 5,
+                        .width = 40,
+                        .height = 40,
+                    }, "<") != 0) {
+                        page_current = .{ .select = .{
+                            .paths = null,
+                        } };
+                        break :frame;
+                    }
+                }
+
+                const label_height: i32 = label: {
+                    const label: [*:0]const u8 = viewer_data.path;
+                    const label_font_size = 48;
+                    const label_size = rl.measureTextEx(font, label, label_font_size, 0.1);
+                    const label_top_pad = 10;
+
+                    rl.drawText(
+                        label,
+                        @divTrunc(window_width, 2) - @divTrunc(@as(i32, @intFromFloat(label_size.x)), 2),
+                        label_top_pad,
+                        label_font_size,
+                        rl.Color.black,
+                    );
+                    break :label @as(i32, @intFromFloat(label_size.y)) + label_top_pad + 20;
+                };
+                _ = label_height;
+            },
         }
 
         // const res = rgui.guiListView(rl.Rectangle{
