@@ -30,9 +30,9 @@ pub fn main() anyerror!void {
 
     const Page = union(enum) {
         select: struct {
-            paths: ?[][*:0]const u8,
+            paths: ?[][:0]const u8,
         },
-        viewer: struct { path: [*:0]const u8 },
+        viewer: struct { path: [:0]const u8 },
     };
 
     var page_current: Page = .{
