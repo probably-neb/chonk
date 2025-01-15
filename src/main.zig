@@ -112,7 +112,13 @@ pub fn main() anyerror!void {
                     }
                 }
             },
-            .viewer => |viewer_data| frame: {
+            .viewer => |*viewer_data| frame: {
+                if (viewer_data.worker_thread == null) worker: {
+                    viewer_data.worker_thread = Thread.spawn(.{}, lib.index_paths_starting_with, .{viewer_data.path}) catch |err| {
+                        std.debug.print("ERROR: failed to spawn worker thread: {any}\n", .{err});
+                        break :worker;
+                    };
+                }
                 const window_width = rl.getRenderWidth();
 
                 {

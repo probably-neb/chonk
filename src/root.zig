@@ -94,4 +94,54 @@ pub const DB = struct {
             \\)
         );
     }
+
+    pub const Entry = struct {
+        abs_path: []const u8,
+        size_bytes: u64,
+        kind: FileKind,
+    };
 };
+
+pub fn index_paths_starting_with(root_path: []const u8) !void {
+    const fs = std.fs;
+
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    const alloc = arena.allocator();
+
+    std.debug.assert(fs.path.isAbsolute(root_path));
+
+    const root_dir = try fs.openDirAbsolute(root_path, .{
+        .iterate = true,
+    });
+
+    var queue = try std.ArrayList(fs.Dir).initCapacity(alloc, 4096);
+
+    try queue.append(root_dir);
+
+    const SAVE_BATCH_COUNT = 32;
+    var save_queue = try std.ArrayList(DB.Entry).initCapacity(alloc, SAVE_BATCH_COUNT * 2);
+
+    _ = std.fs.Dir.Entry;
+
+    while (queue.popOrNull()) |dir| {
+        var dir_iter = dir.iterate();
+        while (dir_iter.next() catch null) |entry| {
+            switch (entry.kind) {
+                .directory => {
+                    std.debug.print("Found Path {s} TYPE=DIR\n", .{entry.name});
+                    const path = try alloc.dupe(u8, entry.name);
+                    try save_queue.append(.{
+                        .abs_path = path,
+                        .size_bytes = 0,
+                        .kind = .dir,
+                    });
+                },
+                .file => {
+                    std.debug.print("Found Path {s} TYPE=DIR\n", .{entry.name});
+                },
+                // TODO: links
+                else => continue,
+            }
+        }
+    }
+}
