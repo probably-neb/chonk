@@ -1,6 +1,7 @@
 const std = @import("std");
 const lib = @import("root.zig");
 const Thread = std.Thread;
+const Allocator = std.mem.Allocator;
 const c = @cImport(@cInclude("sqlite3.h"));
 
 const rl = @import("raylib");
@@ -32,6 +33,7 @@ pub fn main() anyerror!void {
     var connection_pool = try lib.DB.init_pool(alloc_state, 2);
     const conn = connection_pool.acquire();
     try lib.DB.ensure_init(conn);
+    connection_pool.release(conn);
     if (c.sqlite3_config(c.SQLITE_CONFIG_LOG, error_log_callback, c.SQLITE_NULL) != c.SQLITE_OK) {
         std.debug.print("WARN: Failed to setup db logging\n", .{});
     }
@@ -47,6 +49,8 @@ pub fn main() anyerror!void {
             worker_thread: ?Thread = null,
             scroll_state: rl.Vector2 = undefined,
             scroll_view: rl.Rectangle = undefined,
+            query_thread: ?Thread = null,
+            dir_entries: DirEntriesThreadState = .{},
         },
     };
 
@@ -133,6 +137,18 @@ pub fn main() anyerror!void {
 
                     viewer_data.worker_thread = thread;
                 }
+                if (viewer_data.dir_entries.thread == null) dir_entries: {
+                    viewer_data.dir_entries.alive_mutex.lock();
+                    const thread = Thread.spawn(.{}, dir_entries_thread_impl, .{
+                        &viewer_data.dir_entries, viewer_data.path, connection_pool,
+                    }) catch |err| {
+                        std.debug.print("ERROR: failed to spawn query thread: {any}\n", .{err});
+                        viewer_data.dir_entries.alive_mutex.unlock();
+                        break :dir_entries;
+                    };
+                    thread.detach();
+                    viewer_data.dir_entries.thread = thread;
+                }
                 const window_width = rl.getRenderWidth();
 
                 {
@@ -150,6 +166,7 @@ pub fn main() anyerror!void {
                         } };
                         // tell worker thread to go die
                         worker_thread_mutex.unlock();
+                        viewer_data.dir_entries.alive_mutex.unlock();
                         break :frame;
                     }
                 }
@@ -170,10 +187,9 @@ pub fn main() anyerror!void {
                     break :label @as(i32, @intFromFloat(label_size.y)) + label_top_pad + 20;
                 };
 
-                const dir_entries = lib.DB.entries_get_direct_children_of(conn, frame_arena_alloc, viewer_data.path) catch |err| {
-                    std.debug.print("ERROR: failed to retrieve dir entries from db: {any}\n", .{err});
-                    break :frame;
-                };
+                viewer_data.dir_entries.data_mutex.lock();
+                defer viewer_data.dir_entries.data_mutex.unlock();
+                const dir_entries = viewer_data.dir_entries.data;
 
                 // std.debug.print("FOUND {d} entries\n", .{dir_entries.len});
 
@@ -232,7 +248,7 @@ pub fn main() anyerror!void {
                         rl.Color.black,
                     );
                     const size_text = fmt_file_size(frame_arena_alloc, file.size_bytes);
-                    std.debug.print("{s} size text {s}\n", .{ file.abs_path, size_text });
+                    // std.debug.print("{s} size text {s}\n", .{ file.abs_path, size_text });
                     const size_text_size = rl.measureTextEx(font, size_text, path_font_size, 0);
                     rl.drawText(
                         size_text,
@@ -245,17 +261,54 @@ pub fn main() anyerror!void {
                 rl.endScissorMode();
             },
         }
-
-        // const res = rgui.guiListView(rl.Rectangle{
-        //     .x = 0.0,
-        //     .y = 0.0,
-        //     .width = @floatFromInt(rl.getRenderWidth()),
-        //     .height = @floatFromInt(rl.getRenderHeight()),
-        // }, "My List", &file_list_scroll_index, &file_list_active);
-
-        // Draw each file name in the list
-        //----------------------------------------------------------------------------------
     }
+}
+
+const DirEntriesThreadState = struct {
+    data: []lib.DB.Entry = &.{},
+    thread: ?Thread = null,
+    data_mutex: Thread.Mutex = Thread.Mutex{},
+    alive_mutex: Thread.Mutex = Thread.Mutex{},
+    arenas: ArenaPair = .{
+        .a = std.heap.ArenaAllocator.init(std.heap.page_allocator),
+        .b = std.heap.ArenaAllocator.init(std.heap.page_allocator),
+    },
+
+    const ArenaPair = struct {
+        a: std.heap.ArenaAllocator,
+        b: std.heap.ArenaAllocator,
+    };
+};
+
+fn dir_entries_thread_impl(state: *DirEntriesThreadState, path: []const u8, connection_pool: *lib.sqlite.Pool) void {
+    const conn = connection_pool.acquire();
+    defer connection_pool.release(conn);
+
+    defer state.arenas.a.deinit();
+    defer state.arenas.b.deinit();
+
+    while (!state.alive_mutex.tryLock()) {
+        const time_now = std.time.nanoTimestamp();
+        const new_data = lib.DB.entries_get_direct_children_of(conn, state.arenas.b.allocator(), path) catch |err| {
+            std.debug.print("ERROR: failed to retrieve dir entries: {any}\n", .{err});
+            continue;
+        };
+        const time_end = std.time.nanoTimestamp();
+        std.debug.print("INFO: query took {d}ms\n", .{
+            @divTrunc(time_end - time_now, std.time.ns_per_ms),
+        });
+        // atomic_swap:
+        {
+            state.data_mutex.lock();
+            defer state.data_mutex.unlock();
+            state.data = new_data;
+        }
+        std.mem.swap(std.heap.ArenaAllocator, &state.arenas.a, &state.arenas.b);
+        _ = state.arenas.b.reset(.retain_capacity);
+        // std.time.sleep(500 * std.time.ns_per_ms);
+        // Thread.yield() catch continue;
+    }
+    state.alive_mutex.unlock();
 }
 
 fn error_log_callback(_: *allowzero anyopaque, error_code: c_int, msg: [*:0]const u8) callconv(.C) void {
@@ -271,6 +324,6 @@ fn pad(rect: rl.Rectangle, x: f32, y: f32) rl.Rectangle {
     };
 }
 
-fn fmt_file_size(alloc: std.mem.Allocator, bytes: u64) [:0]const u8 {
+fn fmt_file_size(alloc: Allocator, bytes: u64) [:0]const u8 {
     return std.fmt.allocPrintZ(alloc, "{}", .{std.fmt.fmtIntSizeDec(bytes)}) catch "";
 }
