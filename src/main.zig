@@ -25,6 +25,8 @@ pub fn main() anyerror!void {
     rl.setTargetFPS(60); // Set our game to run at 60 frames-per-second
     //--------------------------------------------------------------------------------------
 
+    std.debug.print("INFO path_size_bytes: {d}\n", .{std.fs.max_path_bytes});
+
     const alloc_state = std.heap.page_allocator;
 
     var frame_arena = std.heap.ArenaAllocator.init(alloc_state);
