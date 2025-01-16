@@ -53,6 +53,10 @@ pub fn main() anyerror!void {
             scroll_view: rl.Rectangle = undefined,
             query_thread: ?Thread = null,
             dir_entries: DirEntriesThreadState = .{},
+            dbg: struct {
+                files_indexed: u64 = 0,
+                files_indexed_prev: u64 = 0,
+            } = .{},
         },
     };
 
@@ -128,9 +132,30 @@ pub fn main() anyerror!void {
                 }
             },
             .viewer => |*viewer_data| frame: {
+                const show_dbg_info = true;
+                defer if (show_dbg_info) dbg: {
+                    const frame_rate = rl.getFPS();
+                    const frame_time = rl.getFrameTime();
+
+                    const files_per_second = @as(f64, @floatFromInt(viewer_data.dbg.files_indexed -| viewer_data.dbg.files_indexed_prev)) / frame_time;
+                    viewer_data.dbg.files_indexed_prev = viewer_data.dbg.files_indexed;
+
+                    const debug_text_size = 32;
+
+                    rgui.guiSetStyle(.default, rgui.GuiDefaultProperty.text_size, debug_text_size);
+
+                    const dbg_text = std.fmt.allocPrintZ(frame_arena_alloc, "FPS={: >4} | FT={: >4}ms | IDX={: >5}/s", .{
+                        frame_rate,
+                        round_to_decimal_places(frame_time / std.time.ms_per_s, 5),
+                        round_to_decimal_places(files_per_second, 5),
+                    }) catch {
+                        break :dbg;
+                    };
+                    rl.drawText(dbg_text, 0, rl.getRenderHeight() - debug_text_size - 5, debug_text_size, rl.Color.black);
+                };
                 if (viewer_data.worker_thread == null) worker: {
                     worker_thread_mutex.lock(); // FIXME: ensure no infinite wait
-                    const thread = Thread.spawn(.{}, lib.index_paths_starting_with, .{ viewer_data.path, &worker_thread_mutex, connection_pool }) catch |err| {
+                    const thread = Thread.spawn(.{}, lib.index_paths_starting_with, .{ viewer_data.path, &worker_thread_mutex, connection_pool, &viewer_data.dbg.files_indexed }) catch |err| {
                         std.debug.print("ERROR: failed to spawn worker thread: {any}\n", .{err});
                         worker_thread_mutex.unlock();
                         break :worker;
@@ -290,15 +315,15 @@ fn dir_entries_thread_impl(state: *DirEntriesThreadState, path: []const u8, conn
     defer state.arenas.b.deinit();
 
     while (!state.alive_mutex.tryLock()) {
-        const time_now = std.time.nanoTimestamp();
+        // const time_now = std.time.nanoTimestamp();
         const new_data = lib.DB.entries_get_direct_children_of(conn, state.arenas.b.allocator(), path) catch |err| {
             std.debug.print("ERROR: failed to retrieve dir entries: {any}\n", .{err});
             continue;
         };
-        const time_end = std.time.nanoTimestamp();
-        std.debug.print("INFO: query took {d}ms\n", .{
-            @divTrunc(time_end - time_now, std.time.ns_per_ms),
-        });
+        // const time_end = std.time.nanoTimestamp();
+        // std.debug.print("INFO: query took {d}ms\n", .{
+        //     @divTrunc(time_end - time_now, std.time.ns_per_ms),
+        // });
         // atomic_swap:
         {
             state.data_mutex.lock();
@@ -328,4 +353,9 @@ fn pad(rect: rl.Rectangle, x: f32, y: f32) rl.Rectangle {
 
 fn fmt_file_size(alloc: Allocator, bytes: u64) [:0]const u8 {
     return std.fmt.allocPrintZ(alloc, "{}", .{std.fmt.fmtIntSizeDec(bytes)}) catch "";
+}
+
+fn round_to_decimal_places(value: f64, decimal_places: usize) f64 {
+    const factor = std.math.pow(f64, 10.0, @floatFromInt(decimal_places));
+    return std.math.round(value * factor) / factor;
 }

@@ -266,7 +266,7 @@ pub const DB = struct {
     }
 };
 
-pub fn index_paths_starting_with(root_path: []const u8, mutex: *std.Thread.Mutex, connection_pool: *sqlite.Pool) !void {
+pub fn index_paths_starting_with(root_path: []const u8, mutex: *std.Thread.Mutex, connection_pool: *sqlite.Pool, files_indexed: *u64) !void {
     const fs = std.fs;
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -299,6 +299,7 @@ pub fn index_paths_starting_with(root_path: []const u8, mutex: *std.Thread.Mutex
         }
         var dir_iter = dir.iterate();
         while (dir_iter.next() catch null) |entry| {
+            defer files_indexed.* += 1;
             switch (entry.kind) {
                 .directory => {
                     // std.debug.print("Found Path {s} TYPE=DIR\n", .{entry.name});
