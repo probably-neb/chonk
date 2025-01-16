@@ -290,6 +290,13 @@ pub fn index_paths_starting_with(root_path: []const u8, mutex: *std.Thread.Mutex
                         .size_bytes = 0,
                         .kind = .dir,
                     });
+                    const sub_dir = fs.openDirAbsolute(path, .{
+                        .iterate = true,
+                    }) catch |err| {
+                        std.debug.print("ERROR: failed to recurse into dir: '{s}' reason: {any}\n", .{ path, err });
+                        continue;
+                    };
+                    try queue.append(sub_dir);
                 },
                 .file => {
                     std.debug.print("Found Path {s} TYPE=DIR\n", .{entry.name});
