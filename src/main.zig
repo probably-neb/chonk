@@ -166,7 +166,31 @@ pub fn main() anyerror!void {
                     );
                     break :label @as(i32, @intFromFloat(label_size.y)) + label_top_pad + 20;
                 };
-                _ = label_height;
+
+                const dir_entries = lib.DB.entries_get_direct_children_of(conn, frame_arena_alloc, viewer_data.path) catch |err| {
+                    std.debug.print("ERROR: failed to retrieve dir entries from db: {any}\n", .{err});
+                    break :frame;
+                };
+
+                const window_width_f32: f32 = @floatFromInt(window_width);
+                const path_width = window_width_f32 * 0.5;
+
+                const path_x = (window_width_f32 / 2) - (path_width / 2);
+                const path_height = 60;
+                const path_font_size = 32;
+
+                rgui.guiSetStyle(.default, rgui.GuiDefaultProperty.text_size, path_font_size);
+
+                for (dir_entries, 0..) |file, i| {
+                    const path_y = @as(f32, @floatFromInt(label_height + @as(i32, @intCast((i * path_height))))); // 30 pixels spacing between lines
+                    rl.drawText(
+                        try frame_arena_alloc.dupeZ(u8, std.fs.path.basename(file.abs_path)),
+                        @intFromFloat(path_x),
+                        @intFromFloat(path_y),
+                        path_font_size,
+                        rl.Color.black,
+                    );
+                }
             },
         }
 

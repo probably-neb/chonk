@@ -170,6 +170,40 @@ pub const DB = struct {
             @as(u8, @intFromEnum(entry.kind)),
         });
     }
+
+    pub fn entries_get_direct_children_of(conn: sqlite.Conn, alloc: Allocator, path: []const u8) ![]Entry {
+        var entries = std.ArrayList(Entry).init(alloc);
+
+        std.debug.assert(std.fs.path.isAbsolute(path));
+
+        const base_name = std.fs.path.basename(path);
+        std.debug.assert(base_name.len == 0 or base_name[base_name.len - 1] != std.fs.path.sep_str[0]);
+
+        var rows = try conn.rows(
+            \\ SELECT path, size_bytes, type FROM paths
+            \\ WHERE paths.path LIKE (?) || '/%' AND
+            \\       paths.path NOT LIKE (?) || '/%/%';
+        ,
+            .{
+                base_name,
+                base_name,
+            },
+        );
+        defer rows.deinit();
+        while (rows.next()) |row| {
+            var entry: Entry = undefined;
+            entry.abs_path = row.text(0);
+            entry.size_bytes = @intFromFloat(row.float(1));
+            entry.kind = @enumFromInt(@as(u8, @intCast(row.int(2))));
+            try entries.append(entry);
+        }
+        if (rows.err) |err| {
+            return err;
+        }
+
+        // WARN: memory leak
+        return entries.items;
+    }
 };
 
 pub fn index_paths_starting_with(root_path: []const u8, mutex: *std.Thread.Mutex) !void {
