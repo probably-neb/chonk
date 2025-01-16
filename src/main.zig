@@ -231,6 +231,16 @@ pub fn main() anyerror!void {
                         path_font_size,
                         rl.Color.black,
                     );
+                    const size_text = fmt_file_size(frame_arena_alloc, file.size_bytes);
+                    std.debug.print("{s} size text {s}\n", .{ file.abs_path, size_text });
+                    const size_text_size = rl.measureTextEx(font, size_text, path_font_size, 0);
+                    rl.drawText(
+                        size_text,
+                        @intFromFloat(scroll_bounds.x + scroll_bounds.width - size_text_size.x - 50),
+                        @intFromFloat(path_y),
+                        path_font_size,
+                        rl.Color.black,
+                    );
                 }
                 rl.endScissorMode();
             },
@@ -259,4 +269,8 @@ fn pad(rect: rl.Rectangle, x: f32, y: f32) rl.Rectangle {
         .height = rect.height - y,
         .width = rect.width - x,
     };
+}
+
+fn fmt_file_size(alloc: std.mem.Allocator, bytes: u64) [:0]const u8 {
+    return std.fmt.allocPrintZ(alloc, "{}", .{std.fmt.fmtIntSizeDec(bytes)}) catch "";
 }
