@@ -45,6 +45,8 @@ pub fn main() anyerror!void {
         viewer: struct {
             path: [:0]const u8,
             worker_thread: ?Thread = null,
+            scroll_state: rl.Vector2 = undefined,
+            scroll_view: rl.Rectangle = undefined,
         },
     };
 
@@ -175,17 +177,53 @@ pub fn main() anyerror!void {
 
                 // std.debug.print("FOUND {d} entries\n", .{dir_entries.len});
 
-                const window_width_f32: f32 = @floatFromInt(window_width);
-                const path_width = window_width_f32 * 0.5;
-
-                const path_x = (window_width_f32 / 2) - (path_width / 2);
-                const path_height = 60;
                 const path_font_size = 32;
+                const path_height = 60;
+
+                const window_width_f32: f32 = @floatFromInt(window_width);
+                const window_height_f32: f32 = @floatFromInt(rl.getRenderHeight());
+                const scroll_width = window_width_f32 * 0.8;
+                const scroll_height = window_height_f32 - @as(f32, @floatFromInt(label_height)) - 100;
+
+                const scroll_bounds = rl.Rectangle{
+                    .x = (window_width_f32 / 2) - (scroll_width / 2),
+                    .y = @floatFromInt(label_height + 50),
+                    .height = scroll_height,
+                    .width = scroll_width,
+                };
+                const scroll_content = rl.Rectangle{
+                    .x = 0,
+                    .y = 0,
+                    .width = scroll_width,
+                    .height = @floatFromInt(dir_entries.len * path_height),
+                };
+
+                _ = rgui.guiScrollPanel(scroll_bounds, null, scroll_content, &viewer_data.scroll_state, &viewer_data.scroll_view);
+
+                const showScrollBounds = false;
+                if (showScrollBounds) {
+                    rl.drawRectangleRec(.{
+                        .x = scroll_bounds.x + viewer_data.scroll_state.x,
+                        .y = scroll_bounds.y + viewer_data.scroll_state.y,
+                        .width = scroll_content.width,
+                        .height = scroll_content.height,
+                    }, rl.Color.fade(rl.Color.gold, 0.1));
+                }
+
+                // const path_width = window_width_f32 * 0.5;
+
+                rl.beginScissorMode(
+                    @intFromFloat(viewer_data.scroll_view.x),
+                    @intFromFloat(viewer_data.scroll_view.y),
+                    @intFromFloat(viewer_data.scroll_view.width),
+                    @intFromFloat(viewer_data.scroll_view.height),
+                );
+                const path_x = scroll_bounds.x;
 
                 rgui.guiSetStyle(.default, rgui.GuiDefaultProperty.text_size, path_font_size);
 
                 for (dir_entries, 0..) |file, i| {
-                    const path_y = @as(f32, @floatFromInt(label_height + @as(i32, @intCast((i * path_height))))); // 30 pixels spacing between lines
+                    const path_y = scroll_bounds.y + @as(f32, @floatFromInt((i * path_height))) + viewer_data.scroll_state.y; // 30 pixels spacing between lines
                     rl.drawText(
                         try frame_arena_alloc.dupeZ(u8, std.fs.path.basename(file.abs_path)),
                         @intFromFloat(path_x),
@@ -194,6 +232,7 @@ pub fn main() anyerror!void {
                         rl.Color.black,
                     );
                 }
+                rl.endScissorMode();
             },
         }
 
@@ -211,4 +250,13 @@ pub fn main() anyerror!void {
 
 fn error_log_callback(_: *allowzero anyopaque, error_code: c_int, msg: [*:0]const u8) callconv(.C) void {
     std.debug.print("ERROR(SQLITE_LOG): {d} {s}\n", .{ error_code, msg });
+}
+
+fn pad(rect: rl.Rectangle, x: f32, y: f32) rl.Rectangle {
+    return rl.Rectangle{
+        .x = rect.x + x,
+        .y = rect.y + y,
+        .height = rect.height - y,
+        .width = rect.width - x,
+    };
 }
