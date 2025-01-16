@@ -7,6 +7,8 @@ const c = @cImport(@cInclude("sqlite3.h"));
 const rl = @import("raylib");
 const rgui = @import("raygui");
 
+const WORKER_THREAD_COUNT_MAX = 4;
+
 pub fn main() anyerror!void {
     // Initialization
     //--------------------------------------------------------------------------------------
@@ -32,7 +34,7 @@ pub fn main() anyerror!void {
     var frame_arena = std.heap.ArenaAllocator.init(alloc_state);
     const frame_arena_alloc = frame_arena.allocator();
 
-    var connection_pool = try lib.DB.init_pool(alloc_state, 2);
+    var connection_pool = try lib.DB.init_pool(alloc_state, 4);
     const conn = connection_pool.acquire();
     try lib.DB.ensure_init(conn);
     connection_pool.release(conn);
@@ -40,15 +42,16 @@ pub fn main() anyerror!void {
         std.debug.print("WARN: Failed to setup db logging\n", .{});
     }
 
-    var worker_thread_mutex = Thread.Mutex{};
-
     const Page = union(enum) {
         select: struct {
             paths: ?[]lib.TopLevelPath = null,
         },
         viewer: struct {
             path: [:0]const u8,
-            worker_thread: ?Thread = null,
+            worker_thread_pool: Thread.Pool = undefined,
+            worker_thread_pool_running: Thread.ResetEvent = .{},
+            worker_thread_pool_queue: lib.DirQueue = undefined,
+            trickle_queue: lib.AtomicQueue(lib.FileSizeEntry) = undefined,
             scroll_state: rl.Vector2 = undefined,
             scroll_view: rl.Rectangle = undefined,
             query_thread: ?Thread = null,
@@ -153,17 +156,6 @@ pub fn main() anyerror!void {
                     };
                     rl.drawText(dbg_text, 0, rl.getRenderHeight() - debug_text_size - 5, debug_text_size, rl.Color.black);
                 };
-                if (viewer_data.worker_thread == null) worker: {
-                    worker_thread_mutex.lock(); // FIXME: ensure no infinite wait
-                    const thread = Thread.spawn(.{}, lib.index_paths_starting_with, .{ viewer_data.path, &worker_thread_mutex, connection_pool, &viewer_data.dbg.files_indexed }) catch |err| {
-                        std.debug.print("ERROR: failed to spawn worker thread: {any}\n", .{err});
-                        worker_thread_mutex.unlock();
-                        break :worker;
-                    };
-                    thread.detach();
-
-                    viewer_data.worker_thread = thread;
-                }
                 if (viewer_data.dir_entries.thread == null) dir_entries: {
                     viewer_data.dir_entries.alive_mutex.lock();
                     const thread = Thread.spawn(.{}, dir_entries_thread_impl, .{
@@ -175,6 +167,77 @@ pub fn main() anyerror!void {
                     };
                     thread.detach();
                     viewer_data.dir_entries.thread = thread;
+                }
+                if (!viewer_data.worker_thread_pool_running.isSet()) worker: {
+                    viewer_data.worker_thread_pool_running.set();
+                    Thread.Pool.init(&viewer_data.worker_thread_pool, .{
+                        .allocator = alloc_state,
+                        .n_jobs = WORKER_THREAD_COUNT_MAX,
+                    }) catch |err| {
+                        std.debug.print("ERROR: failed to create worker thread pool: {any}\n", .{err});
+                        viewer_data.worker_thread_pool_running.reset();
+                        viewer_data.worker_thread_pool.deinit();
+                        break :worker;
+                    };
+                    try viewer_data.worker_thread_pool_queue.init(alloc_state, 1024);
+                    {
+                        const tl_conn = connection_pool.acquire();
+                        defer connection_pool.release(conn);
+                        var dir = try std.fs.openDirAbsolute(viewer_data.path, .{ .iterate = true });
+                        defer dir.close();
+                        var dir_iter = dir.iterate();
+                        while (dir_iter.next() catch null) |entry| {
+                            const abs_path = std.fs.path.join(frame_arena_alloc, &.{ viewer_data.path, entry.name }) catch continue;
+                            switch (entry.kind) {
+                                .file => {
+                                    try lib.DB.entries_save_one(tl_conn, .{
+                                        .kind = .file,
+                                        .size_bytes = stat: {
+                                            const file = std.fs.openFileAbsolute(abs_path, .{ .mode = .read_only }) catch break :stat 0;
+                                            const stat = file.stat() catch break :stat 0;
+                                            break :stat stat.size;
+                                        },
+                                        .abs_path = abs_path,
+                                    });
+                                },
+                                .directory => {
+                                    try lib.DB.entries_save_one(tl_conn, .{
+                                        .kind = .dir,
+                                        .size_bytes = 0,
+                                        .abs_path = abs_path,
+                                    });
+                                },
+                                .sym_link => {
+                                    try lib.DB.entries_save_one(tl_conn, .{
+                                        .kind = .link_soft,
+                                        .size_bytes = 0,
+                                        .abs_path = abs_path,
+                                    });
+                                },
+                                else => continue,
+                            }
+                            try viewer_data.worker_thread_pool_queue.enqueue(abs_path);
+                        }
+                    }
+                    viewer_data.trickle_queue.init();
+                    try viewer_data.worker_thread_pool.spawn(lib.trickle_up_file_sizes, .{ connection_pool, &viewer_data.trickle_queue });
+                }
+
+                {
+                    const new_dirs = try viewer_data.worker_thread_pool_queue.empty(alloc_state);
+                    defer alloc_state.free(new_dirs);
+                    if (new_dirs.len > 0) {
+                        std.debug.print("Found new dirs:\n", .{});
+                    }
+                    for (new_dirs) |dir| {
+                        std.debug.print("\t'{s}'\n", .{dir});
+                        viewer_data.worker_thread_pool.spawn(lib.index_paths_starting_with, .{ dir, alloc_state, &viewer_data.worker_thread_pool_queue, &viewer_data.worker_thread_pool_running, connection_pool, &viewer_data.dbg.files_indexed, &viewer_data.trickle_queue }) catch |err| {
+                            std.debug.print("ERROR: failed to spawn worker thread: {any}\n", .{err});
+                            viewer_data.worker_thread_pool_running.reset();
+                            viewer_data.worker_thread_pool.deinit();
+                            try viewer_data.worker_thread_pool_queue.enqueue(dir);
+                        };
+                    }
                 }
                 const window_width = rl.getRenderWidth();
 
@@ -192,7 +255,8 @@ pub fn main() anyerror!void {
                             .paths = null,
                         } };
                         // tell worker thread to go die
-                        worker_thread_mutex.unlock();
+                        viewer_data.worker_thread_pool_running.reset();
+                        viewer_data.worker_thread_pool.deinit();
                         viewer_data.dir_entries.alive_mutex.unlock();
                         break :frame;
                     }
