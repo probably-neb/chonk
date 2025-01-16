@@ -298,6 +298,7 @@ pub fn index_paths_starting_with(root_path: []const u8, mutex: *std.Thread.Mutex
             return;
         }
         var dir_iter = dir.iterate();
+
         while (dir_iter.next() catch null) |entry| {
             defer files_indexed.* += 1;
             switch (entry.kind) {
@@ -341,17 +342,13 @@ pub fn index_paths_starting_with(root_path: []const u8, mutex: *std.Thread.Mutex
 
         while (save_queue.items.len >= DB.ENTRY_SAVE_BATCH_COUNT) {
             const batch: *const [DB.ENTRY_SAVE_BATCH_COUNT]DB.Entry = &save_queue.items[0..DB.ENTRY_SAVE_BATCH_COUNT].*;
-            for (batch) |entry| {
-                try DB.entries_save_one(conn, entry);
-            }
+            try DB.entries_save_batch(conn, batch);
             try save_queue.replaceRange(0, DB.ENTRY_SAVE_BATCH_COUNT, &.{});
         }
     }
     while (save_queue.items.len >= DB.ENTRY_SAVE_BATCH_COUNT) {
         const batch: *const [DB.ENTRY_SAVE_BATCH_COUNT]DB.Entry = &save_queue.items[0..DB.ENTRY_SAVE_BATCH_COUNT].*;
-        for (batch) |entry| {
-            try DB.entries_save_one(conn, entry);
-        }
+        try DB.entries_save_batch(conn, batch);
         try save_queue.replaceRange(0, DB.ENTRY_SAVE_BATCH_COUNT, &.{});
     }
     for (save_queue.items) |entry| {
