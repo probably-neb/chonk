@@ -195,10 +195,36 @@ pub const DB = struct {
         std.debug.assert(std.fs.path.isAbsolute(path));
 
         var rows = try conn.rows(
-            \\ SELECT path, size_bytes, type FROM paths
-            \\ WHERE paths.path LIKE (?) || '/%'
-            \\ AND
-            \\       paths.path NOT LIKE (?) || '/%/%';
+            \\ WITH DirectoryPaths AS (
+            \\     -- First identify directories (type = 0)
+            \\     SELECT 
+            \\         path.path,
+            \\         path.type,
+            \\         CASE 
+            \\             WHEN path.type = 0 THEN (
+            \\                 -- For directories, sum up sizes of all contained files
+            \\                 SELECT COALESCE(SUM(sub.size_bytes), 0)
+            \\                 FROM paths sub
+            \\                 WHERE 
+            \\                     -- Match all paths that start with the directory path followed by /
+            \\                     sub.path LIKE path.path || '/%'
+            \\                     -- Only count files, not subdirectories
+            \\                     AND sub.type != 0
+            \\             )
+            \\             -- For files, use their own size
+            \\             ELSE path.size_bytes 
+            \\         END as total_size_bytes
+            \\     FROM paths path
+            \\ )
+            \\ SELECT 
+            \\     path,
+            \\     total_size_bytes as size_bytes,
+            \\     type
+            \\ FROM DirectoryPaths
+            \\ WHERE 
+            \\     path LIKE (?) || '/%'
+            \\     AND path NOT LIKE (?) || '/%/%'
+            \\ ORDER BY total_size_bytes DESC;
         ,
             .{
                 path,
