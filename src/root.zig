@@ -2,7 +2,7 @@ const std = @import("std");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 
-const sqlite = @import("zqlite");
+pub const sqlite = @import("zqlite");
 
 pub const TopLevelPath = struct {
     path: [:0]const u8,
@@ -64,9 +64,9 @@ pub const DB = struct {
         link_hard = 3,
     };
 
-    pub fn connect(alloc: Allocator) !sqlite.Conn {
-        const db_name = "chonk.sqlite3.db";
+    const db_name = "chonk.sqlite3.db";
 
+    fn resolve_path(alloc: Allocator) ![:0]u8 {
         const path = if (@import("builtin").mode == .Debug) dir: {
             const dir = comptime std.fs.cwd();
             var buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -78,12 +78,30 @@ pub const DB = struct {
         } else {
             unreachable;
         };
+        return path;
+    }
+
+    pub fn connect(alloc: Allocator) !sqlite.Conn {
+        const path = try DB.resolve_path(alloc);
 
         const flags = sqlite.OpenFlags.Create | sqlite.OpenFlags.EXResCode;
         return sqlite.open(path, flags);
     }
 
+    pub fn init_pool(alloc: Allocator, count: usize) !*sqlite.Pool {
+        const path = try DB.resolve_path(alloc);
+        const pool = try sqlite.Pool.init(alloc, .{
+            .path = path,
+            .flags = sqlite.OpenFlags.Create | sqlite.OpenFlags.EXResCode,
+            .size = count,
+        });
+        return pool;
+    }
+
     pub fn ensure_init(conn: sqlite.Conn) !void {
+        try conn.execNoArgs(
+            \\ PRAGMA journal_mode=WAL;        
+        );
         try conn.execNoArgs(
             \\create table if not exists paths (
             \\    id integer primary key autoincrement,
@@ -176,23 +194,21 @@ pub const DB = struct {
 
         std.debug.assert(std.fs.path.isAbsolute(path));
 
-        const base_name = std.fs.path.basename(path);
-        std.debug.assert(base_name.len == 0 or base_name[base_name.len - 1] != std.fs.path.sep_str[0]);
-
         var rows = try conn.rows(
             \\ SELECT path, size_bytes, type FROM paths
-            \\ WHERE paths.path LIKE (?) || '/%' AND
+            \\ WHERE paths.path LIKE (?) || '/%'
+            \\ AND
             \\       paths.path NOT LIKE (?) || '/%/%';
         ,
             .{
-                base_name,
-                base_name,
+                path,
+                path,
             },
         );
         defer rows.deinit();
         while (rows.next()) |row| {
             var entry: Entry = undefined;
-            entry.abs_path = row.text(0);
+            entry.abs_path = try alloc.dupe(u8, row.text(0));
             entry.size_bytes = @intFromFloat(row.float(1));
             entry.kind = @enumFromInt(@as(u8, @intCast(row.int(2))));
             try entries.append(entry);
@@ -206,13 +222,14 @@ pub const DB = struct {
     }
 };
 
-pub fn index_paths_starting_with(root_path: []const u8, mutex: *std.Thread.Mutex) !void {
+pub fn index_paths_starting_with(root_path: []const u8, mutex: *std.Thread.Mutex, connection_pool: *sqlite.Pool) !void {
     const fs = std.fs;
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     const alloc = arena.allocator();
 
-    const conn = try DB.connect(std.heap.page_allocator);
+    const conn = connection_pool.acquire();
+    defer connection_pool.release(conn);
 
     std.debug.assert(fs.path.isAbsolute(root_path));
 

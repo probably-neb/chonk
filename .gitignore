@@ -2,3 +2,4 @@
 zig-out/
 
 chonk.sqlite3.db
+chonk.sqlite3.db-wal

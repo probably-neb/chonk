@@ -29,7 +29,8 @@ pub fn main() anyerror!void {
     var frame_arena = std.heap.ArenaAllocator.init(alloc_state);
     const frame_arena_alloc = frame_arena.allocator();
 
-    const conn = try lib.DB.connect(alloc_state);
+    var connection_pool = try lib.DB.init_pool(alloc_state, 2);
+    const conn = connection_pool.acquire();
     try lib.DB.ensure_init(conn);
     if (c.sqlite3_config(c.SQLITE_CONFIG_LOG, error_log_callback, c.SQLITE_NULL) != c.SQLITE_OK) {
         std.debug.print("WARN: Failed to setup db logging\n", .{});
@@ -121,7 +122,7 @@ pub fn main() anyerror!void {
             .viewer => |*viewer_data| frame: {
                 if (viewer_data.worker_thread == null) worker: {
                     worker_thread_mutex.lock(); // FIXME: ensure no infinite wait
-                    const thread = Thread.spawn(.{}, lib.index_paths_starting_with, .{ viewer_data.path, &worker_thread_mutex }) catch |err| {
+                    const thread = Thread.spawn(.{}, lib.index_paths_starting_with, .{ viewer_data.path, &worker_thread_mutex, connection_pool }) catch |err| {
                         std.debug.print("ERROR: failed to spawn worker thread: {any}\n", .{err});
                         worker_thread_mutex.unlock();
                         break :worker;
@@ -171,6 +172,8 @@ pub fn main() anyerror!void {
                     std.debug.print("ERROR: failed to retrieve dir entries from db: {any}\n", .{err});
                     break :frame;
                 };
+
+                // std.debug.print("FOUND {d} entries\n", .{dir_entries.len});
 
                 const window_width_f32: f32 = @floatFromInt(window_width);
                 const path_width = window_width_f32 * 0.5;
