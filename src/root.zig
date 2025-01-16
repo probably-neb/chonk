@@ -111,6 +111,31 @@ pub const DB = struct {
             \\    parent_id integer references paths(id) default null
             \\)
         );
+        const indexes = .{
+            // Index for path pattern matching
+            \\ CREATE INDEX IF NOT EXISTS idx_paths_path 
+            \\ ON paths(path);
+            ,
+            // Composite index for path + type combination
+            \\ CREATE INDEX IF NOT EXISTS idx_paths_path_type 
+            \\ ON paths(path, type);
+            ,
+            // Index specifically for type field since we filter on it
+            \\ CREATE INDEX IF NOT EXISTS idx_paths_type 
+            \\ ON paths(type);
+            ,
+            // Index for size_bytes to help with sorting and summation
+            \\ CREATE INDEX IF NOT EXISTS idx_paths_size 
+            \\ ON paths(size_bytes);
+            ,
+            // Composite index that might help with the common combination
+            \\ CREATE INDEX IF NOT EXISTS idx_paths_type_size 
+            \\ ON paths(type, size_bytes);
+            ,
+        };
+        inline for (indexes) |index| {
+            try conn.execNoArgs(index);
+        }
     }
 
     pub const Entry = struct {
@@ -283,7 +308,7 @@ pub fn index_paths_starting_with(root_path: []const u8, mutex: *std.Thread.Mutex
         while (dir_iter.next() catch null) |entry| {
             switch (entry.kind) {
                 .directory => {
-                    std.debug.print("Found Path {s} TYPE=DIR\n", .{entry.name});
+                    // std.debug.print("Found Path {s} TYPE=DIR\n", .{entry.name});
                     const path = try dir.realpathAlloc(alloc, entry.name);
                     try save_queue.append(.{
                         .abs_path = path,
@@ -299,7 +324,7 @@ pub fn index_paths_starting_with(root_path: []const u8, mutex: *std.Thread.Mutex
                     try queue.append(sub_dir);
                 },
                 .file => {
-                    std.debug.print("Found Path {s} TYPE=DIR\n", .{entry.name});
+                    // std.debug.print("Found Path {s} TYPE=DIR\n", .{entry.name});
                     const path = try dir.realpathAlloc(alloc, entry.name);
                     const size = blk: {
                         const file = try dir.openFile(entry.name, .{
