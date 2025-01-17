@@ -372,12 +372,30 @@ pub fn AtomicQueue(comptime T: type) type {
             }
             return null;
         }
+
+        pub fn try_pop(self: *@This()) ?*Node {
+            if (!self.mutex.tryLock()) {
+                return null;
+            }
+            defer self.mutex.unlock();
+
+            if (self.head) |h| {
+                self.head = h.next;
+                if (self.head == self.tail) {
+                    self.tail = null;
+                }
+                return h;
+            }
+            return null;
+        }
     };
 }
 
 pub const FileSizeEntry = struct {
     size: u64,
     abs_path: std.BoundedArray(u8, std.fs.max_path_bytes),
+
+    pub const BATCH_SIZE_MAX = 64;
 };
 
 const fts = @cImport({
@@ -416,8 +434,8 @@ pub fn index_paths_starting_with(root_path: []const u8, base_alloc: Allocator, d
 
     var fts_entry: ?*fts.FTSENT = fts.fts_read(state);
     while (fts_entry) |fts_ent| : (fts_entry = fts.fts_read(state)) {
-        // _ = @atomicRmw(u64, files_indexed, .Add, 1, .monotonic);
-        files_indexed.* += 1;
+        _ = @atomicRmw(u64, files_indexed, .Add, 1, .monotonic);
+        // files_indexed.* += 1;
 
         save_queue.append(switch (fts_ent.fts_info) {
             fts.FTS_D => .{
@@ -437,18 +455,20 @@ pub fn index_paths_starting_with(root_path: []const u8, base_alloc: Allocator, d
             },
             else => continue,
         }) catch continue;
-        // std.debug.print("CHILD: PATH={s} NAME={s}\n", .{ @as([*:0]u8, fts_ent.fts_path), @as([*:0]u8, @ptrCast(&fts_ent.fts_name)) });
+        std.debug.print("CHILD: PATH={s} NAME={s}\n", .{ @as([*:0]u8, fts_ent.fts_path), @as([*:0]u8, @ptrCast(&fts_ent.fts_name)) });
 
         while (save_queue.items.len >= DB.ENTRY_SAVE_BATCH_COUNT) {
             const batch: *const [DB.ENTRY_SAVE_BATCH_COUNT]DB.Entry = &save_queue.items[0..DB.ENTRY_SAVE_BATCH_COUNT].*;
             DB.entries_save_batch(conn, batch) catch continue;
-            for (batch) |entry| {
-                if (entry.kind == .file) {
-                    var node: *AtomicQueue(FileSizeEntry).Node = trickle_queue.pool.create() catch continue;
-                    node.value.abs_path.resize(0) catch unreachable;
-                    node.value.abs_path.appendSlice(entry.abs_path) catch unreachable;
-                    node.value.size = entry.size_bytes;
-                    trickle_queue.push(node);
+            {
+                for (batch) |entry| {
+                    if (entry.kind == .file) {
+                        var node: *AtomicQueue(FileSizeEntry).Node = trickle_queue.pool.create() catch continue;
+                        node.value.abs_path.resize(0) catch unreachable;
+                        node.value.abs_path.appendSlice(entry.abs_path) catch unreachable;
+                        node.value.size = entry.size_bytes;
+                        trickle_queue.push(node);
+                    }
                 }
             }
             save_queue.replaceRange(0, DB.ENTRY_SAVE_BATCH_COUNT, &.{}) catch continue;
@@ -569,7 +589,7 @@ pub fn trickle_up_file_sizes(connection_pool: *sqlite.Pool, trickle_queue: *Atom
     // FIXME: KILL THIS THREAD
     while (true) {
         std.atomic.spinLoopHint();
-        if (trickle_queue.pop()) |node| {
+        if (trickle_queue.try_pop()) |node| {
             const conn = connection_pool.acquire();
             defer connection_pool.release(conn);
             const path = node.value.abs_path.slice();
