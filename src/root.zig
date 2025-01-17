@@ -1,5 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
+const mem = std.mem;
+
 const Allocator = std.mem.Allocator;
 const Atomic = std.atomic.Value;
 
@@ -403,7 +405,9 @@ const fts = @cImport({
     @cInclude("fts.h");
 });
 
-pub fn index_paths_starting_with(root_path: []const u8, base_alloc: Allocator, dir_queue: *DirQueue, running: *const std.Thread.ResetEvent, connection_pool: *sqlite.Pool, files_indexed: *u64, trickle_queue: *AtomicQueue(FileSizeEntry)) void {
+pub fn index_paths_starting_with(root_path: []const u8, base_alloc: Allocator, store: *FS_Store, running: *const std.Thread.ResetEvent, files_indexed: *u64) void {
+    _ = running;
+
     std.debug.print("INDEX START : {s}\n", .{root_path});
     const fs = std.fs;
     defer base_alloc.free(root_path);
@@ -412,176 +416,95 @@ pub fn index_paths_starting_with(root_path: []const u8, base_alloc: Allocator, d
     const alloc = arena.allocator();
     defer arena.deinit();
 
-    const conn = connection_pool.acquire();
-    defer connection_pool.release(conn);
-
     if (!fs.path.isAbsolute(root_path)) {
         std.debug.print("WARN: NOT ABSOLUTE: '{s}'\n", .{root_path});
         return;
     }
 
-    _ = dir_queue;
-    _ = running;
-
     const root_dir_z = alloc.dupeZ(u8, root_path) catch return;
     const path_args: [2][*c]u8 = .{ root_dir_z, @ptrFromInt(0) };
 
     const state: *fts.FTS = fts.fts_open(&path_args, fts.FTS_PHYSICAL, null);
-
     defer _ = fts.fts_close(state);
 
-    var save_queue = std.ArrayList(DB.Entry).initCapacity(alloc, DB.ENTRY_SAVE_BATCH_COUNT * 2) catch return;
+    var cursor: FS_Store.Cursor = store.new_cursor_at(root_path) catch {
+        // FIXME: error;
+        return;
+    };
 
     var fts_entry: ?*fts.FTSENT = fts.fts_read(state);
+
     while (fts_entry) |fts_ent| : (fts_entry = fts.fts_read(state)) {
         _ = @atomicRmw(u64, files_indexed, .Add, 1, .monotonic);
         // files_indexed.* += 1;
+        const name = @as([*]u8, @ptrCast(&fts_ent.fts_name))[0..fts_ent.fts_namelen];
 
-        save_queue.append(switch (fts_ent.fts_info) {
-            fts.FTS_D => .{
-                .kind = .dir,
-                .abs_path = alloc.dupe(u8, @as([*:0]u8, fts_ent.fts_path)[0..fts_ent.fts_pathlen]) catch continue,
-                .size_bytes = 0,
+        switch (fts_ent.fts_info) {
+            fts.FTS_D => {},
+            fts.FTS_F, fts.FTS_SL => continue, // handled by children call
+            fts.FTS_DP => {
+                // TODO: use variables left in FTENT structure for user use to keep track of child index and
+                // create backtrack_index fn to avoid search
+                cursor.backtrack(name);
+                continue;
             },
-            fts.FTS_F => .{
-                .kind = .file,
-                .abs_path = alloc.dupe(u8, @as([*:0]u8, fts_ent.fts_path)[0..fts_ent.fts_pathlen]) catch continue,
-                .size_bytes = if (@as(?*fts.struct_stat, fts_ent.fts_statp)) |stat| @intCast(stat.st_size) else 0,
+            else => {
+                // TODO: handle errors
+                continue;
             },
-            fts.FTS_SL => .{
-                .kind = .link_soft,
-                .abs_path = alloc.dupe(u8, @as([*:0]u8, fts_ent.fts_path)[0..fts_ent.fts_pathlen]) catch continue,
-                .size_bytes = 0,
-            },
-            else => continue,
-        }) catch continue;
-        std.debug.print("CHILD: PATH={s} NAME={s}\n", .{ @as([*:0]u8, fts_ent.fts_path), @as([*:0]u8, @ptrCast(&fts_ent.fts_name)) });
+        }
+        cursor.recurse_into(name) catch {
+            // TODO: error
+            continue;
+        };
+        const children: ?*fts.FTSENT = fts.fts_children(state, 0);
 
-        while (save_queue.items.len >= DB.ENTRY_SAVE_BATCH_COUNT) {
-            const batch: *const [DB.ENTRY_SAVE_BATCH_COUNT]DB.Entry = &save_queue.items[0..DB.ENTRY_SAVE_BATCH_COUNT].*;
-            DB.entries_save_batch(conn, batch) catch continue;
-            {
-                for (batch) |entry| {
-                    if (entry.kind == .file) {
-                        var node: *AtomicQueue(FileSizeEntry).Node = trickle_queue.pool.create() catch continue;
-                        node.value.abs_path.resize(0) catch unreachable;
-                        node.value.abs_path.appendSlice(entry.abs_path) catch unreachable;
-                        node.value.size = entry.size_bytes;
-                        trickle_queue.push(node);
-                    }
-                }
+        var child = children;
+        var count: u32 = 0;
+        while (child) |c| : (count += 1) {
+            child = c.fts_link;
+        }
+
+        cursor.children_begin(count);
+        defer cursor.children_end();
+
+        while (child) |c| {
+            defer child = c.fts_link;
+            // TODO: simd kind getting
+            var kind: FS_Store.Entry.FileKind = undefined;
+
+            switch (c.fts_info) {
+                fts.FTS_D => kind = .dir,
+                fts.FTS_F => kind = .file,
+                fts.FTS_SL => kind = .link_soft, // TODO: ensure proper handling of hard/soft link sizes
+                fts.FTS_DP => {
+                    unreachable;
+                },
+                else => {
+                    // TODO: handle errors
+                    continue;
+                },
             }
-            save_queue.replaceRange(0, DB.ENTRY_SAVE_BATCH_COUNT, &.{}) catch continue;
-        }
-    }
-    std.debug.print("EXITING\n", .{});
-    for (save_queue.items) |entry| {
-        DB.entries_save_one(conn, entry) catch continue;
-    }
-    for (save_queue.items) |entry| {
-        if (entry.kind == .file) {
-            var node: *AtomicQueue(FileSizeEntry).Node = trickle_queue.pool.create() catch continue;
-            node.value.abs_path.resize(0) catch unreachable;
-            node.value.abs_path.appendSlice(entry.abs_path) catch unreachable;
-            node.value.size = entry.size_bytes;
-            trickle_queue.push(node);
+
+            // TODO: inode
+            const entry_ptr = cursor.child_init();
+            defer cursor.child_finish();
+
+            const child_byte_count: u64, const child_block_count: u64 = if (@as(?*fts.struct_stat, c.fts_statp)) |stat_info|
+                .{ @intCast(stat_info.st_size), @intCast(stat_info.st_blocks) } // TODO: check st_blocksize
+            else
+                .{ 0, 0 };
+
+            const child_name = @as([*]u8, @ptrCast(&c.fts_name))[0..c.fts_namelen];
+
+            entry_ptr.byte_count = child_byte_count;
+            entry_ptr.block_count = child_block_count;
+            entry_ptr.kind = @intFromEnum(kind);
+            @memcpy(&entry_ptr.name, child_name);
+            entry_ptr.name[c.fts_namelen] = 0;
         }
     }
 
-    // const root_dir = fs.openDirAbsolute(root_path, .{
-    //     .iterate = true,
-    // }) catch {
-    //     return;
-    // };
-    //
-    // var queue = std.ArrayList(fs.Dir).initCapacity(alloc, 4096) catch {
-    //     return;
-    // };
-    //
-    // queue.append(root_dir) catch return;
-    //
-    // var save_queue = std.ArrayList(DB.Entry).initCapacity(alloc, DB.ENTRY_SAVE_BATCH_COUNT * 2) catch return;
-    //
-    _ = std.fs.Dir.Entry;
-    //
-    // // defer std.debug.print("worker thread go die\n", .{});
-    //
-    // while (queue.popOrNull()) |dir| {
-    //     if (!running.isSet()) {
-    //         // NOTE: maybe should save already done work first?
-    //         return;
-    //     }
-    //     var dir_iter = dir.iterate();
-    //
-    //     var file_sizes_total: u64 = 0;
-    //     var file_sizes_path: []const u8 = &.{};
-    //
-    //     while (dir_iter.next() catch null) |entry| {
-    //         defer files_indexed.* += 1;
-    //         switch (entry.kind) {
-    //             .directory => {
-    //                 // std.debug.print("Found Path {s} TYPE=DIR\n", .{entry.name});
-    //                 const path = dir.realpathAlloc(alloc, entry.name) catch continue;
-    //                 save_queue.append(.{
-    //                     .abs_path = path,
-    //                     .size_bytes = 0,
-    //                     .kind = .dir,
-    //                 }) catch continue;
-    //                 // const sub_dir = fs.openDirAbsolute(path, .{
-    //                 //     .iterate = true,
-    //                 // }) catch |err| {
-    //                 //     std.debug.print("ERROR: failed to recurse into dir: '{s}' reason: {any}\n", .{ path, err });
-    //                 //     continue;
-    //                 // };
-    //                 // try queue.append(sub_dir);
-    //                 dir_queue.enqueue(path) catch return;
-    //                 // pool.spawn(index_paths_starting_with, .{
-    //                 //     path, pool, connection_pool, files_indexed,
-    //                 // }) catch |err| {
-    //                 //     std.debug.print("ERROR: failed to recurse into dir: '{s}' reason: {any}\n", .{ path, err });
-    //                 //     continue;
-    //                 // };
-    //             },
-    //             .file => {
-    //                 // std.debug.print("Found Path {s} TYPE=DIR\n", .{entry.name});
-    //                 const path = dir.realpathAlloc(alloc, entry.name) catch return;
-    //                 const size = blk: {
-    //                     const file = dir.openFile(entry.name, .{
-    //                         .mode = .read_only,
-    //                     }) catch continue;
-    //                     const size = (file.stat() catch continue).size;
-    //                     break :blk size;
-    //                 };
-    //                 save_queue.append(.{
-    //                     .abs_path = path,
-    //                     .size_bytes = size,
-    //                     .kind = .file,
-    //                 }) catch continue;
-    //                 file_sizes_total += size;
-    //                 file_sizes_path = path;
-    //             },
-    //             // TODO: links
-    //             else => continue,
-    //         }
-    //     }
-    //
-    //     if (file_sizes_total > 0) {
-    //         DB.update_parent_sizes_of(conn, file_sizes_path, file_sizes_total) catch return;
-    //     }
-    //     while (save_queue.items.len >= DB.ENTRY_SAVE_BATCH_COUNT) {
-    //         const batch: *const [DB.ENTRY_SAVE_BATCH_COUNT]DB.Entry = &save_queue.items[0..DB.ENTRY_SAVE_BATCH_COUNT].*;
-    //         DB.entries_save_batch(conn, batch) catch continue;
-    //         save_queue.replaceRange(0, DB.ENTRY_SAVE_BATCH_COUNT, &.{}) catch continue;
-    //     }
-    // }
-    // while (save_queue.items.len >= DB.ENTRY_SAVE_BATCH_COUNT) {
-    //     const batch: *const [DB.ENTRY_SAVE_BATCH_COUNT]DB.Entry = &save_queue.items[0..DB.ENTRY_SAVE_BATCH_COUNT].*;
-    //     DB.entries_save_batch(conn, batch) catch continue;
-    //     save_queue.replaceRange(0, DB.ENTRY_SAVE_BATCH_COUNT, &.{}) catch break;
-    // }
-    // for (save_queue.items) |entry| {
-    //     DB.entries_save_one(conn, entry) catch continue;
-    // }
     return;
 }
 
@@ -598,3 +521,234 @@ pub fn trickle_up_file_sizes(connection_pool: *sqlite.Pool, trickle_queue: *Atom
         }
     }
 }
+
+// REQUIREMENTS
+// - allow multiple concurrent writes to different subtrees
+// - some sort of cursor mechanism for saving current location in tree
+// - packing nodes as tightly together as possible
+// - packing adjacent entries together
+//
+// DATA
+// - path name part
+// -- variable (< `getconf NAME_MAX /` ~~ 255)
+// -- store index into large byte buffer
+// --- requires deduplication to be size efficient
+// --- could duplicate tree chunk (idx + count) logic to name sizes to load fixed number of pages
+// -- or just store inode and when name is needed walk dir to correlate inode to name
+// - kind (u4 / u8)
+// - children ptrs
+// -- if adjacent children are packed together, then only need
+// --- u64: page index of start
+// --- u16? count
+// - apparent size: u64 = count bytes
+// -     disk size: u64 = number of blocks
+// - mtime/read time: u64
+pub const FS_Store = struct {
+    ptr: [*]align(PAGE_SIZE) u8,
+    extent: u32,
+    extent_max: u32,
+
+    const posix = std.posix;
+    const PAGE_SIZE = std.mem.page_size;
+    const MMAP_SIZE = PAGE_SIZE * 10_000; //6_000_000; // ~ 122GB of Virtual Address Space
+
+    pub fn init(self: *FS_Store) !void {
+        const fd = if (@import("builtin").mode == .Debug)
+            -1 // in memory only
+        else {
+            unreachable;
+            // var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+            // var path_alloc = std.heap.FixedBufferAllocator.init(path_buf);
+            // const path = FS_Store.resolve_path(path_alloc.allocator()) catch unreachable;
+            // var file = std.fs.openFileAbsolute()
+
+        };
+        _ = std.heap.page_allocator;
+        const pages = posix.mmap(
+            null,
+            MMAP_SIZE,
+            posix.PROT.READ | posix.PROT.WRITE,
+            .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, // FIXME: non-private + figure out what anonymous means when actually using fs
+            fd,
+            0,
+        ) catch |err| {
+            std.debug.print("ERROR: FAILED TO MMAP FS STORE: {}\n", .{err});
+            return err;
+        };
+        self.ptr = pages.ptr;
+        self.extent_max = @intCast(pages.len);
+        self.extent = 1; // TODO: metadata
+    }
+
+    fn resolve_path(alloc: Allocator) ![:0]u8 {
+        const path = if (@import("builtin").mode == .Debug) dir: {
+            const dir = comptime std.fs.cwd();
+            var buf: [std.fs.max_path_bytes]u8 = undefined;
+            const path = try dir.realpath(".", &buf);
+            break :dir try std.fs.path.joinZ(alloc, &.{
+                path,
+                "chonk.store",
+            });
+        } else {
+            unreachable;
+        };
+        return path;
+    }
+
+    pub fn new_cursor_at(self: *FS_Store, path: []const u8) !Cursor {
+        // TODO: look at root node at end of metadata page
+        //       if root not empty => assert is subpath & recurse & find then initialize with partent etc
+        //                    else => initialize root to be base path and expect cursor to initialize rest of store
+        _ = self;
+        _ = path;
+        return error.TODO;
+    }
+
+    pub fn alloc_entries(self: *FS_Store, count: u32) struct { ptr: []Entry, page_start: u32 } {
+        // TODO: free list
+        const ptr: [*]u8 = @ptrFromInt(@intFromPtr(self.ptr) + (self.extent * PAGE_SIZE));
+
+        // get number of pages needed to hold all entries
+        const pages = @divTrunc((count * Entry.SIZE) + PAGE_SIZE - 1, PAGE_SIZE);
+        // TODO: check we'ere under some high_water_mark or max file size
+
+        // TODO: madvise MADV_SEQUENTIAL & MADV_WILLNEED
+        const page_start = self.extent;
+        self.extent += pages;
+        return .{ .ptr = @as([*]Entry, @ptrCast(ptr))[0..count], .page_start = page_start };
+    }
+
+    fn ptr_to_idx(self: *const FS_Store, ptr: anytype) u32 {
+        // std.debug.assert(mem.alignPointer(ptr, PAGE_SIZE).? == ptr);
+        return @intCast(@divExact(@intFromPtr(ptr) - @intFromPtr(self.ptr), PAGE_SIZE));
+    }
+
+    fn idx_to_ptr(self: *const FS_Store, idx: u32) [*]u8 {
+        return @ptrCast(&self.ptr[idx * PAGE_SIZE]);
+    }
+
+    pub const Entry = extern struct {
+        parent: u32 align(1),
+        children_start: u32 align(1),
+        children_count: u32 align(1),
+        byte_count: u64 align(1),
+        block_count: u64 align(1),
+        mtime: u64 align(1),
+        _unused_but_should_be_inode: u32 align(1),
+        lock_this: u8 align(1),
+        lock_child: u8 align(1),
+        kind: u8 align(1),
+        name_len: u8 align(1),
+        name: [NAME_LEN_MAX + 1]u8 align(1),
+
+        // TODO: link to article saying linux names can only be 255 bytes
+        pub const NAME_LEN_MAX = 255;
+        pub const SIZE = 512;
+
+        pub const FileKind = enum(u8) {
+            dir = 0,
+            file = 1,
+            link_soft = 2,
+            link_hard = 3,
+        };
+    };
+
+    comptime {
+        if (@sizeOf(Entry) > Entry.SIZE) {
+            @compileError("Expected @sizeOf(FS_Store.Entry) to be 512B, got " ++ std.fmt.comptimePrint("{d}B", .{@sizeOf(Entry)}));
+        }
+    }
+
+    pub const Cursor = struct {
+        store: *FS_Store,
+        parent: *Entry,
+        parent_idx: u32,
+        cur: *Entry,
+        children: []Entry,
+        children_next: u32,
+
+        pub fn recurse_into(self: *Cursor, path: []const u8) !void {
+            if (&self.children.ptr[0] == self.cur) {
+                return error.Empty;
+            }
+            if (self.children_next < self.children.len) {
+                return error.NotFull;
+            }
+            if (path.len > Entry.NAME_LEN_MAX) {
+                return error.PathToLong;
+            }
+
+            // TODO: update all parents sizes here because this means we finished processing all of this directories files
+
+            const dest: *Entry = dest: for (self.children) |*child| {
+                // PERF: take inode and match that first (linux no entries within same dir have same inode ???)
+                if (mem.eql(u8, path, child.name[0..child.name_len])) {
+                    break :dest child;
+                }
+            } else return error.ChildNotFound;
+
+            if (dest.kind != @intFromEnum(Entry.FileKind.dir)) {
+                return error.NotDir;
+            }
+
+            self.parent = self.cur;
+            self.parent_idx = self.store.ptr_to_idx(self.cur);
+            self.cur = dest;
+            self.children.ptr = @ptrCast(dest);
+            self.children.len = 0;
+            self.children_next = 0;
+        }
+
+        pub fn backtrack(self: *Cursor, path: []const u8) void {
+            std.debug.assert(&self.children.ptr[0] != self.cur);
+            std.debug.assert(self.children.len == self.children_next);
+            const child = self.cur;
+            self.cur = self.parent;
+            std.debug.assert(mem.eql(u8, self.cur.name[0..self.cur.name_len], path));
+            // TODO: put behind is_new flag
+            {
+                self.cur.block_count += child.block_count;
+                self.cur.byte_count += child.byte_count;
+            }
+            self.parent_idx = self.cur.parent;
+            self.parent = @ptrCast(@alignCast(self.store.idx_to_ptr(self.parent_idx)));
+            self.children = @as([*]Entry, @ptrCast(self.store.idx_to_ptr(self.parent.children_start)))[0..self.parent.children_count];
+            self.children_next = @intCast(self.children.len);
+
+            // TODO: update all parents sizes here if child.children_count == 0
+            // because we won't update parents when recursing because we didn't recurse!
+        }
+
+        pub fn children_begin(self: *Cursor, count: u32) void {
+            // if it doesn't then we already called children_begin
+            std.debug.assert(&self.children.ptr[0] == self.cur);
+            const children = self.store.alloc_entries(count);
+            self.children = children.ptr;
+            self.parent.children_count = count;
+            self.parent.children_start = children.page_start;
+        }
+
+        pub fn children_end(self: *Cursor) void {
+            std.debug.assert(self.children_next == self.children.len);
+        }
+
+        pub fn child_init(
+            self: *Cursor,
+        ) *Entry {
+            std.debug.assert(self.children_next < self.children.len);
+            const ptr = &self.children[self.children_next];
+            // FIXME: self.cur_idx
+            ptr.parent = self.store.ptr_to_idx(self.cur);
+            return ptr;
+        }
+
+        pub fn child_finish(self: *Cursor) void {
+            const child = self.children[self.children_next];
+            if (child.kind != @intFromEnum(Entry.FileKind.dir)) {
+                self.parent.byte_count += child.byte_count;
+                self.parent.block_count += child.block_count;
+            }
+            self.children_next += 1;
+        }
+    };
+};

@@ -51,6 +51,7 @@ pub fn main() anyerror!void {
             worker_thread_pool: Thread.Pool = undefined,
             worker_thread_pool_running: Thread.ResetEvent = .{},
             worker_thread_pool_queue: lib.DirQueue = undefined,
+            fs_store: lib.FS_Store = undefined,
             trickle_queue: lib.AtomicQueue(lib.FileSizeEntry) = undefined,
             scroll_state: rl.Vector2 = undefined,
             scroll_view: rl.Rectangle = undefined,
@@ -219,11 +220,17 @@ pub fn main() anyerror!void {
                             try viewer_data.worker_thread_pool_queue.enqueue(abs_path);
                         }
                     }
-                    viewer_data.trickle_queue.init();
-                    try viewer_data.worker_thread_pool.spawn(lib.trickle_up_file_sizes, .{ connection_pool, &viewer_data.trickle_queue });
+                    try viewer_data.fs_store.init();
+
+                    viewer_data.worker_thread_pool.spawn(lib.index_paths_starting_with, .{ viewer_data.path, alloc_state, &viewer_data.fs_store, &viewer_data.worker_thread_pool_running, &viewer_data.dbg.files_indexed }) catch |err| {
+                        std.debug.print("ERROR: failed to spawn worker thread: {any}\n", .{err});
+                        // viewer_data.worker_thread_pool_running.reset();
+                        // viewer_data.worker_thread_pool.deinit();
+                        // try viewer_data.worker_thread_pool_queue.enqueue(dir);
+                    };
                 }
 
-                {
+                if (false) {
                     const new_dirs = try viewer_data.worker_thread_pool_queue.empty(alloc_state);
                     defer alloc_state.free(new_dirs);
                     if (new_dirs.len > 0) {
@@ -231,7 +238,7 @@ pub fn main() anyerror!void {
                     }
                     for (new_dirs) |dir| {
                         std.debug.print("\t'{s}'\n", .{dir});
-                        viewer_data.worker_thread_pool.spawn(lib.index_paths_starting_with, .{ dir, alloc_state, &viewer_data.worker_thread_pool_queue, &viewer_data.worker_thread_pool_running, connection_pool, &viewer_data.dbg.files_indexed, &viewer_data.trickle_queue }) catch |err| {
+                        viewer_data.worker_thread_pool.spawn(lib.index_paths_starting_with, .{ dir, alloc_state, &viewer_data.fs_store, &viewer_data.worker_thread_pool_running, &viewer_data.dbg.files_indexed }) catch |err| {
                             std.debug.print("ERROR: failed to spawn worker thread: {any}\n", .{err});
                             viewer_data.worker_thread_pool_running.reset();
                             viewer_data.worker_thread_pool.deinit();
