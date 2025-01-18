@@ -405,28 +405,29 @@ const fts = @cImport({
     @cInclude("fts.h");
 });
 
-pub fn index_paths_starting_with(root_path: []const u8, base_alloc: Allocator, store: *FS_Store, files_indexed: *u64) void {
-    std.debug.print("INDEX START : {s}\n", .{root_path});
+pub fn index_paths_starting_with(root_path: [:0]const u8, base_alloc: Allocator, store: *FS_Store, files_indexed: *u64) void {
+    _ = base_alloc;
     const fs = std.fs;
     // defer base_alloc.free(root_path);
 
-    var arena = std.heap.ArenaAllocator.init(base_alloc);
-    const alloc = arena.allocator();
-    defer arena.deinit();
+    // var arena = std.heap.ArenaAllocator.init(base_alloc);
+    // const alloc = arena.allocator();
+    // defer arena.deinit();
 
     if (!fs.path.isAbsolute(root_path)) {
         std.debug.print("WARN: NOT ABSOLUTE: '{s}'\n", .{root_path});
         return;
     }
 
-    const root_dir_z = alloc.dupeZ(u8, root_path) catch return;
-    const path_args: [2][*c]u8 = .{ root_dir_z, @ptrFromInt(0) };
+    const path_args: [2][*c]u8 = .{ @ptrCast(@constCast(root_path)), @ptrFromInt(0) };
 
     const state: *fts.FTS = fts.fts_open(&path_args, fts.FTS_PHYSICAL, null);
     defer _ = fts.fts_close(state);
 
-    var cursor: FS_Store.Cursor = store.new_cursor_at(root_path) catch {
-        // FIXME: error;
+    std.debug.print("INDEX START : {s}\n", .{root_path});
+
+    var cursor: FS_Store.Cursor = store.new_cursor_at(root_path) catch |err| {
+        std.debug.print("Failed to init cursor at {s} :: {}\n", .{ root_path, err });
         return;
     };
 

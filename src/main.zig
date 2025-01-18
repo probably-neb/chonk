@@ -69,13 +69,12 @@ pub fn main() anyerror!void {
 
         switch (page_current) {
             .select => |*select_data| frame: {
-                if (select_data.paths == null) {
-                    // FIXME: alloc all with frame_arena, only dupe to alloc_state if clicked
-                    select_data.paths = lib.get_top_level_paths(alloc_state, frame_arena_alloc) catch |err| {
-                        std.debug.print("ERROR: Failed to retrieve file paths: {any}\n", .{err});
-                        break :frame;
-                    };
-                }
+                // FIXME: cache
+                // FIXME: ensure no unessecary dupeZ in lib.get_top_level_paths
+                select_data.paths = lib.get_top_level_paths(frame_arena_alloc, frame_arena_alloc) catch |err| {
+                    std.debug.print("ERROR: Failed to retrieve file paths: {any}\n", .{err});
+                    break :frame;
+                };
                 const window_width = rl.getRenderWidth();
 
                 const label_height: i32 = label: {
@@ -115,9 +114,10 @@ pub fn main() anyerror!void {
                         .height = path_height,
                     }, file_path) != 0) {
                         const page_prev = page_current;
+                        const path = try alloc_state.dupeZ(u8, file_path);
                         page_current = .{
                             .viewer = .{
-                                .path = file_path,
+                                .path = path,
                             },
                         };
                         page_current.viewer.fs_store.init() catch |err| {
