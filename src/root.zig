@@ -433,8 +433,13 @@ pub fn index_paths_starting_with(root_path: [:0]const u8, base_alloc: Allocator,
 
     var fts_entry: ?*fts.FTSENT = fts.fts_read(state);
 
+    var prev_path: []const u8 = root_path;
+
     while (fts_entry) |fts_ent| : (fts_entry = fts.fts_read(state)) {
         _ = @atomicRmw(u64, files_indexed, .Add, 1, .monotonic);
+        const path = @as([*]u8, @ptrCast(fts_ent.fts_path))[0..fts_ent.fts_pathlen];
+        std.debug.print("VISITING '{s}' [cursor_name={s}]\n", .{ path, cursor.cur.name[0..cursor.cur.name_len] });
+        defer prev_path = path;
         // files_indexed.* += 1;
         const name = @as([*]u8, @ptrCast(&fts_ent.fts_name))[0..fts_ent.fts_namelen];
 
@@ -444,6 +449,7 @@ pub fn index_paths_starting_with(root_path: [:0]const u8, base_alloc: Allocator,
             fts.FTS_DP => {
                 // TODO: use variables left in FTENT structure for user use to keep track of child index and
                 // create backtrack_index fn to avoid search
+                std.debug.print("BACKTRACKING FROM '{s}' -> '{s}' [name={s}] [cursor_name={s}]\n", .{ prev_path, path, name, cursor.cur.name[0..cursor.cur.name_len] });
                 cursor.backtrack(name);
                 continue;
             },
@@ -456,6 +462,9 @@ pub fn index_paths_starting_with(root_path: [:0]const u8, base_alloc: Allocator,
             // TODO: error
             continue;
         };
+        if (true) {
+            return;
+        }
         const children: ?*fts.FTSENT = fts.fts_children(state, 0);
 
         var child = children;
@@ -495,12 +504,14 @@ pub fn index_paths_starting_with(root_path: [:0]const u8, base_alloc: Allocator,
                 .{ 0, 0 };
 
             const child_name = @as([*]u8, @ptrCast(&c.fts_name))[0..c.fts_namelen];
+            std.debug.print("CHILD NAME = {s}\n", .{child_name});
 
             entry_ptr.byte_count = child_byte_count;
             entry_ptr.block_count = child_block_count;
             entry_ptr.kind = @intFromEnum(kind);
             @memcpy(&entry_ptr.name, child_name);
-            entry_ptr.name[c.fts_namelen] = 0;
+            entry_ptr.name[child_name.len] = 0;
+            entry_ptr.name_len = @intCast(child_name.len);
         }
     }
 
@@ -551,7 +562,7 @@ pub const FS_Store = struct {
     const PAGE_SIZE = std.mem.page_size;
     const MMAP_SIZE = PAGE_SIZE * 10_000; //6_000_000; // ~ 122GB of Virtual Address Space
 
-    pub fn init(self: *FS_Store) !void {
+    pub fn init(self: *FS_Store, path: [:0]const u8) !void {
         const fd = if (@import("builtin").mode == .Debug)
             -1 // in memory only
         else {
@@ -576,7 +587,18 @@ pub const FS_Store = struct {
         };
         self.ptr = pages.ptr;
         self.extent_max = @intCast(pages.len);
-        self.extent = 1; // TODO: metadata
+        {
+            const root_entry: *Entry = @ptrCast(self.ptr + PAGE_SIZE - Entry.SIZE);
+            root_entry.* = mem.zeroes(Entry);
+            std.debug.assert(std.meta.fieldIndex(Entry, "name_len").? + 1 == std.meta.fieldIndex(Entry, "name").?);
+            const name_len_ptr: *align(1) u16 = @ptrCast(&root_entry.name);
+            name_len_ptr.* = @intCast(path.len);
+            // TODO: use first page for metadata
+            std.debug.assert(path.len < PAGE_SIZE - 1);
+            @memcpy(self.ptr + PAGE_SIZE, path);
+            self.ptr[PAGE_SIZE + path.len] = 0;
+        }
+        self.extent = 2;
     }
 
     fn resolve_path(alloc: Allocator) ![:0]u8 {
@@ -598,8 +620,23 @@ pub const FS_Store = struct {
         // TODO: look at root node at end of metadata page
         //       if root not empty => assert is subpath & recurse & find then initialize with partent etc
         //                    else => initialize root to be base path and expect cursor to initialize rest of store
-        _ = self;
-        _ = path;
+        const root_entry: *Entry = @ptrCast(&self.ptr[PAGE_SIZE - Entry.SIZE]);
+        const root_name_len_ptr: *align(1) u16 = @ptrCast(&root_entry.name);
+        const root_name_len = root_name_len_ptr.*;
+        const root_path: []const u8 = @as([*]const u8, @ptrCast(&self.ptr[PAGE_SIZE]))[0..root_name_len];
+        if (mem.eql(u8, root_path, path)) {
+            var children: []Entry = undefined;
+            children.ptr = @ptrCast(root_entry);
+            children.len = 0;
+            return Cursor{
+                .store = self,
+                .parent = root_entry,
+                .parent_idx = @divExact(PAGE_SIZE - Entry.SIZE, Entry.SIZE),
+                .cur = root_entry,
+                .children = children,
+                .children_next = 0,
+            };
+        }
         return error.TODO;
     }
 
@@ -699,11 +736,11 @@ pub const FS_Store = struct {
         }
 
         pub fn backtrack(self: *Cursor, path: []const u8) void {
-            std.debug.assert(&self.children.ptr[0] != self.cur);
             std.debug.assert(self.children.len == self.children_next);
+            // std.debug.assert(self.children.len == 0 or &self.children.ptr[0] != self.cur);
             const child = self.cur;
             self.cur = self.parent;
-            std.debug.assert(mem.eql(u8, self.cur.name[0..self.cur.name_len], path));
+            std.debug.assert(mem.eql(u8, self.cur.name[0..self.cur.name_len], path) or mem.eql(u8, self.parent.name[0..self.parent.name_len], path));
             // TODO: put behind is_new flag
             {
                 self.cur.block_count += child.block_count;

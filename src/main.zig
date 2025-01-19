@@ -120,7 +120,7 @@ pub fn main() anyerror!void {
                                 .path = path,
                             },
                         };
-                        page_current.viewer.fs_store.init() catch |err| {
+                        page_current.viewer.fs_store.init(path) catch |err| {
                             std.debug.print("ERROR: failed to init FS_Store: {any}\n", .{err});
                             page_current = page_prev;
                             break :frame;
