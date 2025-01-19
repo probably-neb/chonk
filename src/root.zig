@@ -463,6 +463,14 @@ const FTS_Info = enum(c_int) {
     SLNONE = fts.FTS_SLNONE,
 };
 
+const DBG_PRINT_ENABLE = false;
+const dbg_print = if (DBG_PRINT_ENABLE) std.debug.print else struct {
+    fn print(comptime fmt: []const u8, args: anytype) void {
+        _ = fmt;
+        _ = args;
+    }
+}.print;
+
 pub fn index_paths_starting_with(root_path: [:0]const u8, base_alloc: Allocator, store: *FS_Store, files_indexed: *u64) void {
     const fs = std.fs;
     var timer = std.time.Timer.start() catch null;
@@ -482,7 +490,7 @@ pub fn index_paths_starting_with(root_path: [:0]const u8, base_alloc: Allocator,
     const state: *fts.FTS = fts.fts_open(&path_args, fts.FTS_PHYSICAL, null);
     defer _ = fts.fts_close(state);
 
-    std.debug.print("INDEX START : {s}\n", .{root_path});
+    dbg_print("INDEX START : {s}\n", .{root_path});
 
     var cursor: FS_Store.Cursor = store.new_cursor_at(root_path) catch |err| {
         std.debug.print("Failed to init cursor at {s} :: {}\n", .{ root_path, err });
@@ -512,7 +520,7 @@ pub fn index_paths_starting_with(root_path: [:0]const u8, base_alloc: Allocator,
         const name = @as([*]u8, @ptrCast(&fts_ent.fts_name))[0..fts_ent.fts_namelen];
 
         if (fts_ent.fts_info == fts.FTS_D or fts_ent.fts_info == fts.FTS_F or fts_ent.fts_info == fts.FTS_SL) {
-            std.debug.print("VISITING '{s}' [cursor_name={s}] [depth={d}]\n", .{ path, cursor.cur.name[0..cursor.cur.name_len], cursor.depth });
+            dbg_print("VISITING '{s}' [cursor_name={s}] [depth={d}]\n", .{ path, cursor.cur.name[0..cursor.cur.name_len], cursor.depth });
         }
 
         switch (fts_ent.fts_info) {
@@ -521,7 +529,7 @@ pub fn index_paths_starting_with(root_path: [:0]const u8, base_alloc: Allocator,
             fts.FTS_DP => {
                 // TODO: use variables left in FTENT structure for user use to keep track of child index and
                 // create backtrack_index fn to avoid search
-                std.debug.print("BACKTRACKING FROM '{s}' -> '{s}' [name={s}] [cursor_name={s}]\n", .{ prev_path, path, name, cursor.cur.name[0..cursor.cur.name_len] });
+                dbg_print("BACKTRACKING FROM '{s}' -> '{s}' [name={s}] [cursor_name={s}]\n", .{ prev_path, path, name, cursor.cur.name[0..cursor.cur.name_len] });
                 if (fts_ent.fts_level == cursor.depth and mem.eql(u8, cursor.cur.name[0..cursor.cur.name_len], name)) {
                     continue;
                 }
@@ -607,7 +615,7 @@ pub fn index_paths_starting_with(root_path: [:0]const u8, base_alloc: Allocator,
                 .{ 0, 0 };
 
             const child_name = @as([*]u8, @ptrCast(&c.fts_name))[0..c.fts_namelen];
-            std.debug.print("CHILD NAME = {s}\n", .{child_name});
+            dbg_print("CHILD NAME = {s}\n", .{child_name});
 
             entry_ptr.byte_count = child_byte_count;
             entry_ptr.block_count = child_block_count;
