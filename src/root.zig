@@ -676,7 +676,7 @@ pub const FS_Store = struct {
     const PAGE_SIZE = std.mem.page_size;
     const MMAP_SIZE = PAGE_SIZE * 4_000_000; //6_000_000; // ~ 122GB of Virtual Address Space
 
-    const ROOT_ENTRY_INDEX = std.math.maxInt(u32);
+    pub const ROOT_ENTRY_INDEX = std.math.maxInt(u32);
 
     // 1 page for metadata + root entry
     // 1 page for root entry path

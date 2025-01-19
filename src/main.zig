@@ -197,7 +197,41 @@ pub fn main() anyerror!void {
                     break :label @as(i32, @intFromFloat(label_size.y)) + label_top_pad + 20;
                 };
 
-                const dir_entries: []lib.DB.Entry = &.{};
+                const DirEntry = struct {
+                    name: [:0]const u8,
+                    size_bytes: u64,
+
+                    const DirEntry = @This();
+
+                    fn gt_than(_: void, lhs: DirEntry, rhs: DirEntry) bool {
+                        if (lhs.size_bytes == rhs.size_bytes) {
+                            return std.mem.lessThan(u8, lhs.name, rhs.name);
+                        }
+                        return lhs.size_bytes > rhs.size_bytes;
+                    }
+                };
+                const dir_entries: []DirEntry = blk: {
+                    const store = viewer_data.fs_store;
+                    const root = store.root_entry_ptr;
+                    if (root.children_count == 0) {
+                        break :blk &[_]DirEntry{};
+                    }
+                    const children = store.entries[root.children_start..][0..root.children_count];
+                    const dir_entries = try frame_arena_alloc.alloc(DirEntry, children.len);
+                    for (children, dir_entries) |*child, *dir_entry| {
+                        if (child.parent != lib.FS_Store.ROOT_ENTRY_INDEX) {
+                            // not all init
+                            // FIXME: use some space for a checksum (0xdeadbeef) to detect incomplete initialization
+                            break :blk &[_]DirEntry{};
+                        }
+                        dir_entry.* = DirEntry{
+                            .name = @ptrCast(child.name[0..child.name_len]),
+                            .size_bytes = child.byte_count,
+                        };
+                    }
+                    std.sort.insertion(DirEntry, dir_entries, {}, DirEntry.gt_than);
+                    break :blk dir_entries;
+                };
 
                 // std.debug.print("FOUND {d} entries\n", .{dir_entries.len});
 
@@ -249,7 +283,7 @@ pub fn main() anyerror!void {
                 for (dir_entries, 0..) |file, i| {
                     const path_y = scroll_bounds.y + @as(f32, @floatFromInt((i * path_height))) + viewer_data.scroll_state.y; // 30 pixels spacing between lines
                     rl.drawText(
-                        try frame_arena_alloc.dupeZ(u8, std.fs.path.basename(file.abs_path)),
+                        file.name,
                         @intFromFloat(path_x),
                         @intFromFloat(path_y),
                         path_font_size,
