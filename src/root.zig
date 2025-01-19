@@ -465,6 +465,7 @@ const FTS_Info = enum(c_int) {
 
 pub fn index_paths_starting_with(root_path: [:0]const u8, base_alloc: Allocator, store: *FS_Store, files_indexed: *u64) void {
     const fs = std.fs;
+    var timer = std.time.Timer.start() catch null;
     // defer base_alloc.free(root_path);
 
     // var arena = std.heap.ArenaAllocator.init(base_alloc);
@@ -494,6 +495,13 @@ pub fn index_paths_starting_with(root_path: [:0]const u8, base_alloc: Allocator,
     defer base_alloc.free(prev_path);
 
     while (fts_entry) |fts_ent| : (fts_entry = fts.fts_read(state)) {
+        if (fts_ent.fts_level == 0 and cursor.depth == 1) {
+            std.debug.print("INDEXING COMPLETED: {}ms FINAL SIZE={}\n", .{
+                (if (timer) |*t| t.read() else 0) / std.time.ns_per_ms,
+                std.fmt.fmtIntSizeBin(cursor.store.extent * FS_Store.PAGE_SIZE),
+            });
+            return;
+        }
         _ = @atomicRmw(u64, files_indexed, .Add, 1, .monotonic);
         const path = @as([*]u8, @ptrCast(fts_ent.fts_path))[0..fts_ent.fts_pathlen];
         defer if (fts_ent.fts_info == fts.FTS_D) {
@@ -658,7 +666,7 @@ pub const FS_Store = struct {
 
     const posix = std.posix;
     const PAGE_SIZE = std.mem.page_size;
-    const MMAP_SIZE = PAGE_SIZE * 10_000; //6_000_000; // ~ 122GB of Virtual Address Space
+    const MMAP_SIZE = PAGE_SIZE * 4_000_000; //6_000_000; // ~ 122GB of Virtual Address Space
 
     const ROOT_ENTRY_INDEX = std.math.maxInt(u32);
 
@@ -692,7 +700,7 @@ pub const FS_Store = struct {
             return err;
         };
         self.ptr = pages.ptr;
-        self.extent_max = @intCast(pages.len);
+        self.extent_max = @intCast(@divExact(pages.len, PAGE_SIZE));
 
         // FIXME: use self.ptr[0..PAGE_SIZE - Entry.SIZE] for metadata
         self.root_entry_ptr = @ptrCast(self.ptr + PAGE_SIZE - Entry.SIZE);
@@ -724,8 +732,9 @@ pub const FS_Store = struct {
             return Cursor{
                 .store = self,
                 .parent = self.root_entry_ptr,
-                .parent_idx = 0,
+                .parent_idx = ROOT_ENTRY_INDEX,
                 .cur = self.root_entry_ptr,
+                .cur_idx = ROOT_ENTRY_INDEX,
                 .children = children,
                 .children_next = 0,
                 .depth = 0,
@@ -740,6 +749,7 @@ pub const FS_Store = struct {
         // number of pages needed to hold all entries
         const pages = @divTrunc((count * Entry.SIZE) + PAGE_SIZE - 1, PAGE_SIZE);
         // TODO: check we'ere under some high_water_mark or max file size
+        std.debug.assert(self.extent + pages <= self.extent_max);
 
         // TODO: madvise MADV_SEQUENTIAL & MADV_WILLNEED
 
@@ -758,12 +768,6 @@ pub const FS_Store = struct {
             .entries = entries,
             .start_index = start_index,
         };
-    }
-
-    fn entry_ptr_to_index(self: *FS_Store, entry_ptr: *Entry) u32 {
-        if (entry_ptr == self.root_entry_ptr) return ROOT_ENTRY_INDEX;
-
-        return @intCast(@divExact((@intFromPtr(entry_ptr) - @intFromPtr(self.entries.ptr)), Entry.SIZE));
     }
 
     pub const Entry = extern struct {
@@ -805,6 +809,7 @@ pub const FS_Store = struct {
         parent: *Entry,
         parent_idx: u32,
         cur: *Entry,
+        cur_idx: u32,
         children: []Entry,
         children_next: u32,
         depth: u32,
@@ -822,10 +827,10 @@ pub const FS_Store = struct {
 
             // TODO: update all parents sizes here because this means we finished processing all of this directories files
 
-            const dest: *Entry = dest: for (self.children) |*child| {
+            const dest: *Entry, const dest_idx: u32 = dest: for (self.children, self.cur.children_start..) |*child, idx| {
                 // PERF: take inode and match that first (linux no entries within same dir have same inode ???)
                 if (mem.eql(u8, path, child.name[0..child.name_len])) {
-                    break :dest child;
+                    break :dest .{ child, @intCast(idx) };
                 }
             } else return error.ChildNotFound;
 
@@ -835,8 +840,9 @@ pub const FS_Store = struct {
 
             self.parent = self.cur;
             // FIXME: self.cur_idx
-            self.parent_idx = self.store.entry_ptr_to_index(self.cur);
+            self.parent_idx = self.cur_idx;
             self.cur = dest;
+            self.cur_idx = dest_idx;
             self.children.ptr = @ptrCast(dest);
             self.children.len = 0;
             self.children_next = 0;
@@ -857,6 +863,7 @@ pub const FS_Store = struct {
             }
 
             if (self.parent_idx == ROOT_ENTRY_INDEX) {
+                self.cur_idx = ROOT_ENTRY_INDEX;
                 self.cur = self.store.root_entry_ptr;
                 self.parent_idx = ROOT_ENTRY_INDEX;
                 self.parent = self.store.root_entry_ptr;
@@ -869,8 +876,10 @@ pub const FS_Store = struct {
             const grandparent_idx = self.parent.parent;
             const grandparent = if (grandparent_idx == ROOT_ENTRY_INDEX) self.store.root_entry_ptr else &self.store.entries[grandparent_idx];
             const parent = self.parent;
+            const parent_idx = self.parent_idx;
 
             self.cur = parent;
+            self.cur_idx = parent_idx;
             self.parent = grandparent;
             self.parent_idx = grandparent_idx;
             self.children = self.store.entries[parent.children_start..][0..parent.children_count];
@@ -900,7 +909,7 @@ pub const FS_Store = struct {
             std.debug.assert(self.children_next < self.children.len);
             const ptr = &self.children[self.children_next];
             // FIXME: self.cur_idx
-            ptr.parent = self.store.entry_ptr_to_index(self.cur);
+            ptr.parent = self.cur_idx;
             return ptr;
         }
 
