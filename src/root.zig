@@ -405,6 +405,64 @@ const fts = @cImport({
     @cInclude("fts.h");
 });
 
+const FTS_Info = enum(c_int) {
+    /// A directory being visited in preorder.
+    D = fts.FTS_D,
+
+    /// A directory that causes a cycle in the tree.  (The
+    /// fts_cycle field of the FTSENT structure will be
+    /// filled in as well.)
+    DC = fts.FTS_DC,
+
+    /// Any FTSENT structure that represents a file type
+    /// not explicitly described by one of the other
+    /// fts_info values.
+    DEFAULT = fts.FTS_DEFAULT,
+
+    /// A directory which cannot be read.  This is an error
+    /// return, and the fts_errno field will be set to
+    /// indicate what caused the error.
+    DNR = fts.FTS_DNR,
+
+    /// A file named "."  or ".."  which was not specified
+    /// as a filename to fts_open() (see FTS_SEEDOT).
+    DOT = fts.FTS_DOT,
+
+    /// A directory being visited in postorder.  The
+    /// contents of the FTSENT structure will be unchanged
+    /// from when it was returned in preorder, that is,
+    /// with the fts_info field set to FTS_D.
+    DP = fts.FTS_DP,
+
+    /// This is an error return, and the fts_errno field
+    /// will be set to indicate what caused the error.
+    ERR = fts.FTS_ERR,
+
+    /// A regular file.
+    F = fts.FTS_F,
+
+    /// A file for which no [l]stat(2) information was
+    /// available.  The contents of the fts_statp field are
+    /// undefined.  This is an error return, and the
+    /// fts_errno field will be set to indicate what caused
+    /// the error.
+    NS = fts.FTS_NS,
+
+    /// A file for which no [l]stat(2) information was
+    /// requested.  The contents of the fts_statp field are
+    /// undefined.
+    NSOK = fts.FTS_NSOK,
+
+    /// A symbolic link.
+    SL = fts.FTS_SL,
+
+    /// A symbolic link with a nonexistent target.  The
+    /// contents of the fts_statp field reference the file
+    /// characteristic information for the symbolic link
+    /// itself.
+    SLNONE = fts.FTS_SLNONE,
+};
+
 pub fn index_paths_starting_with(root_path: [:0]const u8, base_alloc: Allocator, store: *FS_Store, files_indexed: *u64) void {
     const fs = std.fs;
     // defer base_alloc.free(root_path);
@@ -493,8 +551,9 @@ pub fn index_paths_starting_with(root_path: [:0]const u8, base_alloc: Allocator,
         while (child) |c| {
             defer child = c.fts_link;
             // TODO: simd kind getting
-            var kind: FS_Store.Entry.FileKind = undefined;
+            var kind: FS_Store.Entry.FileKind = .unknown;
 
+            // FIXME: use FTS_Info enum & @enumFromInt for exhaustive switch here and no error
             switch (c.fts_info) {
                 fts.FTS_D => kind = .dir,
                 fts.FTS_F => kind = .file,
@@ -502,9 +561,31 @@ pub fn index_paths_starting_with(root_path: [:0]const u8, base_alloc: Allocator,
                 fts.FTS_DP => {
                     unreachable;
                 },
-                else => {
-                    // TODO: handle errors
-                    continue;
+                fts.FTS_DEFAULT => {},
+                fts.FTS_ERR => {
+                    const val: FTS_Info = @enumFromInt(c.fts_info);
+                    const child_path = @as([*]u8, @ptrCast(&c.fts_path))[0..c.fts_pathlen];
+                    const errno: std.posix.E = @enumFromInt(@abs(c.fts_errno));
+                    std.debug.print("WARN: cannot visit '{s}' :: FTS_{s} :: [errno={s}] \n", .{ child_path, @tagName(val), @tagName(errno) });
+                },
+                fts.FTS_DNR => {
+                    const val: FTS_Info = @enumFromInt(c.fts_info);
+                    const child_path = @as([*]u8, @ptrCast(&c.fts_path))[0..c.fts_pathlen];
+                    const errno: std.posix.E = @enumFromInt(@abs(fts_ent.fts_errno));
+                    std.debug.print("WARN: cannot read dir '{s}' :: FTS_{s} :: [errno={s}] \n", .{ child_path, @tagName(val), @tagName(errno) });
+                },
+                fts.FTS_NS => {
+                    const val: FTS_Info = @enumFromInt(c.fts_info);
+                    const child_path = @as([*]u8, @ptrCast(&c.fts_path))[0..c.fts_pathlen];
+                    const errno: std.posix.E = @enumFromInt(@abs(fts_ent.fts_errno));
+                    std.debug.print("WARN: cannot stat file '{s}' :: FTS_{s} :: [errno={s}] \n", .{ child_path, @tagName(val), @tagName(errno) });
+                },
+                else => |info_val| {
+                    const val: FTS_Info = @enumFromInt(info_val);
+                    const child_path = @as([*]u8, @ptrCast(&c.fts_name))[0..c.fts_namelen];
+                    const errno: std.posix.E = @enumFromInt(@abs(fts_ent.fts_errno));
+                    std.debug.print("ERROR: cannot visit '{s}' :: {s} :: [errno={s}] \n", .{ child_path, @tagName(val), @tagName(errno) });
+                    unreachable;
                 },
             }
 
@@ -709,6 +790,7 @@ pub const FS_Store = struct {
             file = 1,
             link_soft = 2,
             link_hard = 3,
+            unknown = 4,
         };
     };
 
