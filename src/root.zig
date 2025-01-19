@@ -406,7 +406,6 @@ const fts = @cImport({
 });
 
 pub fn index_paths_starting_with(root_path: [:0]const u8, base_alloc: Allocator, store: *FS_Store, files_indexed: *u64) void {
-    _ = base_alloc;
     const fs = std.fs;
     // defer base_alloc.free(root_path);
 
@@ -433,15 +432,22 @@ pub fn index_paths_starting_with(root_path: [:0]const u8, base_alloc: Allocator,
 
     var fts_entry: ?*fts.FTSENT = fts.fts_read(state);
 
-    var prev_path: []const u8 = root_path;
+    var prev_path: []const u8 = base_alloc.dupe(u8, root_path) catch unreachable;
+    defer base_alloc.free(prev_path);
 
     while (fts_entry) |fts_ent| : (fts_entry = fts.fts_read(state)) {
         _ = @atomicRmw(u64, files_indexed, .Add, 1, .monotonic);
         const path = @as([*]u8, @ptrCast(fts_ent.fts_path))[0..fts_ent.fts_pathlen];
-        std.debug.print("VISITING '{s}' [cursor_name={s}]\n", .{ path, cursor.cur.name[0..cursor.cur.name_len] });
-        defer prev_path = path;
+        defer if (fts_ent.fts_info == fts.FTS_D) {
+            base_alloc.free(prev_path);
+            prev_path = base_alloc.dupe(u8, path) catch unreachable;
+        };
         // files_indexed.* += 1;
         const name = @as([*]u8, @ptrCast(&fts_ent.fts_name))[0..fts_ent.fts_namelen];
+
+        if (fts_ent.fts_info == fts.FTS_D or fts_ent.fts_info == fts.FTS_F or fts_ent.fts_info == fts.FTS_SL) {
+            std.debug.print("VISITING '{s}' [cursor_name={s}] [depth={d}]\n", .{ path, cursor.cur.name[0..cursor.cur.name_len], cursor.depth });
+        }
 
         switch (fts_ent.fts_info) {
             fts.FTS_D => {},
@@ -450,6 +456,9 @@ pub fn index_paths_starting_with(root_path: [:0]const u8, base_alloc: Allocator,
                 // TODO: use variables left in FTENT structure for user use to keep track of child index and
                 // create backtrack_index fn to avoid search
                 std.debug.print("BACKTRACKING FROM '{s}' -> '{s}' [name={s}] [cursor_name={s}]\n", .{ prev_path, path, name, cursor.cur.name[0..cursor.cur.name_len] });
+                if (fts_ent.fts_level == cursor.depth and mem.eql(u8, cursor.cur.name[0..cursor.cur.name_len], name)) {
+                    continue;
+                }
                 cursor.backtrack(name);
                 continue;
             },
@@ -458,13 +467,16 @@ pub fn index_paths_starting_with(root_path: [:0]const u8, base_alloc: Allocator,
                 continue;
             },
         }
-        cursor.recurse_into(name) catch {
-            // TODO: error
-            continue;
-        };
-        if (true) {
-            return;
+        if (fts_ent.fts_level > 0) {
+            if (fts_ent.fts_level == cursor.depth) {
+                // stepping sideways, backtrack to parent before recursing into sibling
+                cursor.backtrack(cursor.parent.name[0..cursor.parent.name_len]);
+            }
+            cursor.recurse_into(name) catch {
+                unreachable;
+            };
         }
+
         const children: ?*fts.FTSENT = fts.fts_children(state, 0);
 
         var child = children;
@@ -475,6 +487,8 @@ pub fn index_paths_starting_with(root_path: [:0]const u8, base_alloc: Allocator,
 
         cursor.children_begin(count);
         defer cursor.children_end();
+
+        child = children;
 
         while (child) |c| {
             defer child = c.fts_link;
@@ -509,7 +523,7 @@ pub fn index_paths_starting_with(root_path: [:0]const u8, base_alloc: Allocator,
             entry_ptr.byte_count = child_byte_count;
             entry_ptr.block_count = child_block_count;
             entry_ptr.kind = @intFromEnum(kind);
-            @memcpy(&entry_ptr.name, child_name);
+            @memcpy(entry_ptr.name[0..child_name.len], child_name);
             entry_ptr.name[child_name.len] = 0;
             entry_ptr.name_len = @intCast(child_name.len);
         }
@@ -555,12 +569,23 @@ pub fn trickle_up_file_sizes(connection_pool: *sqlite.Pool, trickle_queue: *Atom
 // - mtime/read time: u64
 pub const FS_Store = struct {
     ptr: [*]align(PAGE_SIZE) u8,
+    root_entry_ptr: *Entry,
+    root_path: [:0]u8,
+    entries: []Entry,
     extent: u32,
     extent_max: u32,
 
     const posix = std.posix;
     const PAGE_SIZE = std.mem.page_size;
     const MMAP_SIZE = PAGE_SIZE * 10_000; //6_000_000; // ~ 122GB of Virtual Address Space
+
+    const ROOT_ENTRY_INDEX = std.math.maxInt(u32);
+
+    // 1 page for metadata + root entry
+    // 1 page for root entry path
+    const HEADER_PAGES_COUNT = 2;
+
+    const ENTRIES_PER_PAGE = @divExact(PAGE_SIZE, Entry.SIZE);
 
     pub fn init(self: *FS_Store, path: [:0]const u8) !void {
         const fd = if (@import("builtin").mode == .Debug)
@@ -587,94 +612,92 @@ pub const FS_Store = struct {
         };
         self.ptr = pages.ptr;
         self.extent_max = @intCast(pages.len);
-        {
-            const root_entry: *Entry = @ptrCast(self.ptr + PAGE_SIZE - Entry.SIZE);
-            root_entry.* = mem.zeroes(Entry);
-            std.debug.assert(std.meta.fieldIndex(Entry, "name_len").? + 1 == std.meta.fieldIndex(Entry, "name").?);
-            const name_len_ptr: *align(1) u16 = @ptrCast(&root_entry.name);
-            name_len_ptr.* = @intCast(path.len);
-            // TODO: use first page for metadata
-            std.debug.assert(path.len < PAGE_SIZE - 1);
-            @memcpy(self.ptr + PAGE_SIZE, path);
-            self.ptr[PAGE_SIZE + path.len] = 0;
-        }
-        self.extent = 2;
-    }
 
-    fn resolve_path(alloc: Allocator) ![:0]u8 {
-        const path = if (@import("builtin").mode == .Debug) dir: {
-            const dir = comptime std.fs.cwd();
-            var buf: [std.fs.max_path_bytes]u8 = undefined;
-            const path = try dir.realpath(".", &buf);
-            break :dir try std.fs.path.joinZ(alloc, &.{
-                path,
-                "chonk.store",
-            });
-        } else {
-            unreachable;
-        };
-        return path;
+        // FIXME: use self.ptr[0..PAGE_SIZE - Entry.SIZE] for metadata
+        self.root_entry_ptr = @ptrCast(self.ptr + PAGE_SIZE - Entry.SIZE);
+        self.root_entry_ptr.* = mem.zeroes(Entry);
+
+        // TODO: save root_entry_name len somehow in root entry (cast name as u16 and store there?)
+
+        std.debug.assert(path.len < PAGE_SIZE - 1);
+        self.root_path.ptr = @ptrCast(self.ptr + PAGE_SIZE);
+        self.root_path.len = path.len;
+        @memcpy(self.root_path, path);
+        self.root_path[path.len] = 0;
+
+        self.extent = HEADER_PAGES_COUNT;
+
+        const entries_ptr: [*]Entry = @ptrCast(self.ptr + (PAGE_SIZE * HEADER_PAGES_COUNT));
+        const entries_count_max = (self.extent_max - HEADER_PAGES_COUNT) * ENTRIES_PER_PAGE;
+        self.entries = entries_ptr[0..entries_count_max];
     }
 
     pub fn new_cursor_at(self: *FS_Store, path: []const u8) !Cursor {
         // TODO: look at root node at end of metadata page
         //       if root not empty => assert is subpath & recurse & find then initialize with partent etc
         //                    else => initialize root to be base path and expect cursor to initialize rest of store
-        const root_entry: *Entry = @ptrCast(&self.ptr[PAGE_SIZE - Entry.SIZE]);
-        const root_name_len_ptr: *align(1) u16 = @ptrCast(&root_entry.name);
-        const root_name_len = root_name_len_ptr.*;
-        const root_path: []const u8 = @as([*]const u8, @ptrCast(&self.ptr[PAGE_SIZE]))[0..root_name_len];
-        if (mem.eql(u8, root_path, path)) {
+        if (mem.eql(u8, self.root_path, path)) {
             var children: []Entry = undefined;
-            children.ptr = @ptrCast(root_entry);
+            children.ptr = @ptrCast(self.root_entry_ptr);
             children.len = 0;
             return Cursor{
                 .store = self,
-                .parent = root_entry,
-                .parent_idx = @divExact(PAGE_SIZE - Entry.SIZE, Entry.SIZE),
-                .cur = root_entry,
+                .parent = self.root_entry_ptr,
+                .parent_idx = 0,
+                .cur = self.root_entry_ptr,
                 .children = children,
                 .children_next = 0,
+                .depth = 0,
             };
         }
         return error.TODO;
     }
 
-    pub fn alloc_entries(self: *FS_Store, count: u32) struct { ptr: []Entry, page_start: u32 } {
+    pub fn alloc_entries(self: *FS_Store, count: u32) struct { entries: []Entry, start_index: u32 } {
         // TODO: free list
-        const ptr: [*]u8 = @ptrFromInt(@intFromPtr(self.ptr) + (self.extent * PAGE_SIZE));
 
-        // get number of pages needed to hold all entries
+        // number of pages needed to hold all entries
         const pages = @divTrunc((count * Entry.SIZE) + PAGE_SIZE - 1, PAGE_SIZE);
         // TODO: check we'ere under some high_water_mark or max file size
 
         // TODO: madvise MADV_SEQUENTIAL & MADV_WILLNEED
+
+        // all children slices start at a page aligned offset
         const page_start = self.extent;
         self.extent += pages;
-        return .{ .ptr = @as([*]Entry, @ptrCast(ptr))[0..count], .page_start = page_start };
+        // convert page index to index within entries
+        const start_index = (page_start - HEADER_PAGES_COUNT) * ENTRIES_PER_PAGE;
+        const entries: []Entry = self.entries[start_index..][0..count];
+        {
+            const entries_ptr_expected = @intFromPtr(@as([*]Entry, @ptrCast(self.ptr + (page_start * PAGE_SIZE))));
+            const entries_ptr_actual = @intFromPtr(@as([*]Entry, @ptrCast(entries.ptr)));
+            std.debug.assert(entries_ptr_actual == entries_ptr_expected);
+        }
+        return .{
+            .entries = entries,
+            .start_index = start_index,
+        };
     }
 
-    fn ptr_to_idx(self: *const FS_Store, ptr: anytype) u32 {
-        // std.debug.assert(mem.alignPointer(ptr, PAGE_SIZE).? == ptr);
-        return @intCast(@divExact(@intFromPtr(ptr) - @intFromPtr(self.ptr), PAGE_SIZE));
-    }
+    fn entry_ptr_to_index(self: *FS_Store, entry_ptr: *Entry) u32 {
+        if (entry_ptr == self.root_entry_ptr) return ROOT_ENTRY_INDEX;
 
-    fn idx_to_ptr(self: *const FS_Store, idx: u32) [*]u8 {
-        return @ptrCast(&self.ptr[idx * PAGE_SIZE]);
+        return @intCast(@divExact((@intFromPtr(entry_ptr) - @intFromPtr(self.entries.ptr)), Entry.SIZE));
     }
 
     pub const Entry = extern struct {
         parent: u32 align(1),
         children_start: u32 align(1),
         children_count: u32 align(1),
+        _unused_but_should_be_inode: u32 align(1),
         byte_count: u64 align(1),
         block_count: u64 align(1),
         mtime: u64 align(1),
-        _unused_but_should_be_inode: u32 align(1),
         lock_this: u8 align(1),
         lock_child: u8 align(1),
         kind: u8 align(1),
         name_len: u8 align(1),
+        _reserved: [212]u8 align(1),
         name: [NAME_LEN_MAX + 1]u8 align(1),
 
         // TODO: link to article saying linux names can only be 255 bytes
@@ -690,7 +713,7 @@ pub const FS_Store = struct {
     };
 
     comptime {
-        if (@sizeOf(Entry) > Entry.SIZE) {
+        if (@sizeOf(Entry) != Entry.SIZE) {
             @compileError("Expected @sizeOf(FS_Store.Entry) to be 512B, got " ++ std.fmt.comptimePrint("{d}B", .{@sizeOf(Entry)}));
         }
     }
@@ -702,6 +725,7 @@ pub const FS_Store = struct {
         cur: *Entry,
         children: []Entry,
         children_next: u32,
+        depth: u32,
 
         pub fn recurse_into(self: *Cursor, path: []const u8) !void {
             if (&self.children.ptr[0] == self.cur) {
@@ -728,28 +752,48 @@ pub const FS_Store = struct {
             }
 
             self.parent = self.cur;
-            self.parent_idx = self.store.ptr_to_idx(self.cur);
+            // FIXME: self.cur_idx
+            self.parent_idx = self.store.entry_ptr_to_index(self.cur);
             self.cur = dest;
             self.children.ptr = @ptrCast(dest);
             self.children.len = 0;
             self.children_next = 0;
+            self.depth += 1;
         }
 
         pub fn backtrack(self: *Cursor, path: []const u8) void {
             std.debug.assert(self.children.len == self.children_next);
+            std.debug.assert(self.cur != self.store.root_entry_ptr); // cannot backtrack from root
+
             // std.debug.assert(self.children.len == 0 or &self.children.ptr[0] != self.cur);
-            const child = self.cur;
-            self.cur = self.parent;
-            std.debug.assert(mem.eql(u8, self.cur.name[0..self.cur.name_len], path) or mem.eql(u8, self.parent.name[0..self.parent.name_len], path));
+            std.debug.assert(mem.eql(u8, self.parent.name[0..self.parent.name_len], path));
+
             // TODO: put behind is_new flag
             {
-                self.cur.block_count += child.block_count;
-                self.cur.byte_count += child.byte_count;
+                self.parent.block_count += self.cur.block_count;
+                self.parent.byte_count += self.cur.byte_count;
             }
-            self.parent_idx = self.cur.parent;
-            self.parent = @ptrCast(@alignCast(self.store.idx_to_ptr(self.parent_idx)));
-            self.children = @as([*]Entry, @ptrCast(self.store.idx_to_ptr(self.parent.children_start)))[0..self.parent.children_count];
-            self.children_next = @intCast(self.children.len);
+
+            if (self.parent_idx == ROOT_ENTRY_INDEX) {
+                self.cur = self.store.root_entry_ptr;
+                self.parent_idx = ROOT_ENTRY_INDEX;
+                self.parent = self.store.root_entry_ptr;
+                self.children = self.store.entries[self.cur.children_start..][0..self.cur.children_count];
+                self.children_next = self.cur.children_count;
+                self.depth = 0;
+                return;
+            }
+
+            const grandparent_idx = self.parent.parent;
+            const grandparent = if (grandparent_idx == ROOT_ENTRY_INDEX) self.store.root_entry_ptr else &self.store.entries[grandparent_idx];
+            const parent = self.parent;
+
+            self.cur = parent;
+            self.parent = grandparent;
+            self.parent_idx = grandparent_idx;
+            self.children = self.store.entries[parent.children_start..][0..parent.children_count];
+            self.children_next = parent.children_count;
+            self.depth -= 1;
 
             // TODO: update all parents sizes here if child.children_count == 0
             // because we won't update parents when recursing because we didn't recurse!
@@ -759,9 +803,9 @@ pub const FS_Store = struct {
             // if it doesn't then we already called children_begin
             std.debug.assert(&self.children.ptr[0] == self.cur);
             const children = self.store.alloc_entries(count);
-            self.children = children.ptr;
-            self.parent.children_count = count;
-            self.parent.children_start = children.page_start;
+            self.children = children.entries;
+            self.cur.children_count = count;
+            self.cur.children_start = children.start_index;
         }
 
         pub fn children_end(self: *Cursor) void {
@@ -774,7 +818,7 @@ pub const FS_Store = struct {
             std.debug.assert(self.children_next < self.children.len);
             const ptr = &self.children[self.children_next];
             // FIXME: self.cur_idx
-            ptr.parent = self.store.ptr_to_idx(self.cur);
+            ptr.parent = self.store.entry_ptr_to_index(self.cur);
             return ptr;
         }
 
