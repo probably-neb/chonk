@@ -3,6 +3,8 @@ const lib = @import("root.zig");
 const Thread = std.Thread;
 const Allocator = std.mem.Allocator;
 
+const colormaps = @import("colormaps.zig");
+
 const rl = @import("raylib");
 const rgui = @import("raygui");
 
@@ -339,7 +341,6 @@ fn squarify(alloc: Allocator, dir_entries: []DirEntry, rect: rl.Rectangle) void 
             return @max((w * w * max_) / (s * s), (s * s) / (w * w * min_));
         }
     };
-    const colors = generate_palette(alloc, dir_entries.len) catch unreachable;
 
     const weights = alloc.alloc(f32, dir_entries.len) catch unreachable;
     {
@@ -353,6 +354,8 @@ fn squarify(alloc: Allocator, dir_entries: []DirEntry, rect: rl.Rectangle) void 
             w.* = scale * @as(f32, @floatFromInt(d.size_bytes));
         }
     }
+    const colors = generate_palette(alloc, weights, .{ .sample = .verdis }) catch unreachable;
+
     var vertical = rect.height < rect.width;
     var w = if (vertical) rect.height else rect.width;
     var x = rect.x;
@@ -389,14 +392,14 @@ fn squarify(alloc: Allocator, dir_entries: []DirEntry, rect: rl.Rectangle) void 
             if (vertical) {
                 const rec = .{ .x = rx, .y = ry, .width = z, .height = d };
                 rl.drawRectangleRec(rec, color);
-                rl.drawRectangleLinesEx(rec, 5, rl.Color.light_gray);
+                rl.drawRectangleLinesEx(rec, 3, rl.Color.light_gray);
                 // createRectangle(rx,ry,z,d,row[j]);
                 ry = ry + d;
             } else {
                 // createRectangle(rx,ry,d,z,row[j]);
                 const rec = .{ .x = rx, .y = ry, .width = d, .height = z };
                 rl.drawRectangleRec(rec, color);
-                rl.drawRectangleLinesEx(rec, 5, rl.Color.light_gray);
+                rl.drawRectangleLinesEx(rec, 3, rl.Color.light_gray);
                 rx = rx + d;
             }
         }
@@ -425,59 +428,118 @@ fn round_to_decimal_places(value: f64, decimal_places: usize) f64 {
     return std.math.round(value * factor) / factor;
 }
 
-fn hcl_to_rgb(h: f32, c: f32, l: f32) rl.Color {
-    const math = std.math;
+/// RGB color structure with values between 0 and 1
+pub const RGB = struct {
+    r: f32,
+    g: f32,
+    b: f32,
 
-    const a1 = c * math.cos(h * math.pi / 180);
-    const b1 = c * math.sin(h * math.pi / 180);
+    pub fn from_arr(rgb: [3]f32) RGB {
+        return RGB{
+            .r = rgb[0],
+            .g = rgb[1],
+            .b = rgb[2],
+        };
+    }
+};
 
-    const L = (l * 255) / 100;
-    const A = a1 + 128;
-    const B = b1 + 128;
-
-    var y = (L + 16) / 116;
-    var x = y + A / 500;
-    var z = y - B / 200;
-
-    x = 0.95047 * (if (x * x * x > 0.008856) x * x * x else (x - 16 / 116) / 7.787);
-    y = 1.00000 * (if (y * y * y > 0.008856) y * y * y else (y - 16 / 116) / 7.787);
-    z = 1.08883 * (if (z * z * z > 0.008856) z * z * z else (z - 16 / 116) / 7.787);
-
-    var r = x * 3.2406 + y * -1.5372 + z * -0.4986;
-    var g = x * -0.9689 + y * 1.8758 + z * 0.0415;
-    var b = x * 0.0557 + y * -0.2040 + z * 1.0570;
-
-    r = @floatCast(if (r > 0.0031308) (1.055 * std.math.pow(f64, r, 1.0 / 2.4) - 0.055) else 12.92 * r);
-    g = @floatCast(if (g > 0.0031308) (1.055 * std.math.pow(f64, g, 1.0 / 2.4) - 0.055) else 12.92 * g);
-    b = @floatCast(if (b > 0.0031308) (1.055 * std.math.pow(f64, b, 1.0 / 2.4) - 0.055) else 12.92 * b);
-
-    const a = 1.0;
-
-    r = @max(0, @min(r, 1.0));
-    g = @max(0, @min(g, 1.0));
-    b = @max(0, @min(b, 1.0));
-
-    return rl.Color.fromNormalized(.{
-        .x = r,
-        .y = g,
-        .z = b,
-        .w = a,
-    });
+/// Linear interpolation between two values
+fn lerp(start: f32, end: f32, t: f32) f32 {
+    return start + t * (end - start);
 }
 
-fn generate_palette(alloc: Allocator, count_int: usize) ![]rl.Color {
-    const palette = try alloc.alloc(rl.Color, count_int);
-    const count: f32 = @floatFromInt(count_int);
-    const hue_step = 360.0 / count;
-    var h: f32 = 0.0;
+/// Linear interpolation between two RGB colors
+fn lerpColor(c1: RGB, c2: RGB, t: f32) RGB {
+    return RGB{
+        .r = lerp(c1.r, c2.r, t),
+        .g = lerp(c1.g, c2.g, t),
+        .b = lerp(c1.b, c2.b, t),
+    };
+}
 
-    for (0..count_int) |i| {
-        const c: f32 = 60.0 + @as(f32, @floatFromInt(i)) / (count - 1) * 40.0;
-        const l: f32 = 70.0 - @as(f32, @floatFromInt(i)) / (count - 1) * 40.0;
-        const color = hcl_to_rgb(h, c, l);
-        palette[i] = color;
-        h += hue_step;
+/// Rainbow color map (follows the HSV color wheel)
+pub fn rainbowColor(value: f32) RGB {
+    const v = std.math.clamp(value, 0.0, 1.0);
+    const h = 1.0 - v; // Reverse direction to match common rainbow maps
+
+    // Convert HSV to RGB (simplified for hue only, S=V=1)
+    const h_i: u32 = @intFromFloat(h * 6.0);
+    const f = h * 6.0 - @as(f32, @floatFromInt(h_i));
+    const p = 0.0;
+    const q = 1.0 - f;
+    const t = f;
+
+    switch (h_i) {
+        0 => return RGB{ .r = 1.0, .g = t, .b = p },
+        1 => return RGB{ .r = q, .g = 1.0, .b = p },
+        2 => return RGB{ .r = p, .g = 1.0, .b = t },
+        3 => return RGB{ .r = p, .g = q, .b = 1.0 },
+        4 => return RGB{ .r = t, .g = p, .b = 1.0 },
+        else => return RGB{ .r = 1.0, .g = p, .b = q },
+    }
+}
+
+pub fn colormapColor(comptime sample: colormaps.options) *const fn (f32) RGB {
+    const map = comptime sample.map();
+    const inverse = switch (sample) {
+        .turbo => false,
+        else => true,
+    };
+
+    return struct {
+        fn get(value: f32) RGB {
+            const v = std.math.clamp(value, 0.0, 1.0);
+
+            const segment = (if (inverse) 1.0 - v else v) * (@as(f32, @floatFromInt(map.len)) - 1.0);
+            const i: usize = @intFromFloat(segment);
+            const t = segment - @floor(segment);
+
+            if (i >= map.len - 1) return RGB.from_arr(map[map.len - 1]);
+            return lerpColor(RGB.from_arr(map[i]), RGB.from_arr(map[i + 1]), t);
+        }
+    }.get;
+}
+
+pub const ColorScheme = union(enum) {
+    rainbow: void,
+    sample: colormaps.options,
+};
+
+pub fn generate_palette(
+    alloc: Allocator,
+    weights: []const f32,
+    scheme: ColorScheme,
+) ![]rl.Color {
+    const colormap = switch (scheme) {
+        .rainbow => rainbowColor,
+        .sample => |sample_scheme| switch (sample_scheme) {
+            inline else => |value| colormapColor(value),
+        },
+    };
+    // Find min and max weights for normalization
+    var min_weight: f32 = weights[0];
+    var max_weight: f32 = weights[0];
+
+    for (weights) |w| {
+        min_weight = @min(min_weight, w);
+        max_weight = @max(max_weight, w);
     }
 
-    return palette;
+    const range = max_weight - min_weight;
+
+    // Generate colors
+    var colors = try alloc.alloc(rl.Color, weights.len);
+
+    for (weights, 0..) |w, i| {
+        const normalized = if (range == 0.0) 0.0 else (w - min_weight) / range;
+        const color = colormap(normalized);
+        colors[i] = rl.colorFromNormalized(.{
+            .x = color.r,
+            .y = color.g,
+            .z = color.b,
+            .w = 1.0,
+        });
+    }
+
+    return colors;
 }
