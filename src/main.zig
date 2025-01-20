@@ -141,10 +141,11 @@ pub fn main() anyerror!void {
 
                     rgui.guiSetStyle(.default, rgui.GuiDefaultProperty.text_size, debug_text_size);
 
-                    const dbg_text = std.fmt.allocPrintZ(frame_arena_alloc, "FPS={: >4} | FT={: >4}ms | IDX={: >5}/s", .{
+                    const dbg_text = std.fmt.allocPrintZ(frame_arena_alloc, "FPS={: >4} | FT={: >4}ms | IDX={: >5}/s | FILES={}", .{
                         frame_rate,
                         round_to_decimal_places(frame_time / std.time.ms_per_s, 5),
                         round_to_decimal_places(files_per_second, 5),
+                        viewer_data.dbg.files_indexed,
                     }) catch {
                         break :dbg;
                     };
@@ -305,6 +306,8 @@ const DirEntry = struct {
     }
 };
 
+// https://cgl.ethz.ch/teaching/scivis_common/Literature/squarifiedTreeMaps.pdf
+// https://github.com/nicopolyptic/treemap/blob/master/src/main/ts/squarifier.ts
 fn squarify(alloc: Allocator, dir_entries: []DirEntry, rect: rl.Rectangle) void {
     // TODO: scaleWeights?
     // this.scaleWeights(nodes, width, height);
@@ -336,6 +339,8 @@ fn squarify(alloc: Allocator, dir_entries: []DirEntry, rect: rl.Rectangle) void 
             return @max((w * w * max_) / (s * s), (s * s) / (w * w * min_));
         }
     };
+    const colors = generate_palette(alloc, dir_entries.len) catch unreachable;
+
     const weights = alloc.alloc(f32, dir_entries.len) catch unreachable;
     {
         var sum_: f32 = 0;
@@ -354,8 +359,11 @@ fn squarify(alloc: Allocator, dir_entries: []DirEntry, rect: rl.Rectangle) void 
     var y = rect.y;
     var rw = rect.width;
     var rh = rect.height;
+
     var row = std.ArrayList(DirEntry).initCapacity(alloc, dir_entries.len) catch unreachable;
     var row_weights = std.ArrayList(f32).initCapacity(alloc, dir_entries.len) catch unreachable;
+    var row_colors = std.ArrayList(rl.Color).initCapacity(alloc, dir_entries.len) catch unreachable;
+
     var i: u32 = 0;
     while (i < dir_entries.len) {
         const c = dir_entries[i];
@@ -368,6 +376,7 @@ fn squarify(alloc: Allocator, dir_entries: []DirEntry, rect: rl.Rectangle) void 
         if (row.items.len == 0 or wit < without) {
             row.appendAssumeCapacity(c);
             row_weights.appendAssumeCapacity(r);
+            row_colors.appendAssumeCapacity(colors[i]);
             i += 1;
             continue;
         }
@@ -376,13 +385,18 @@ fn squarify(alloc: Allocator, dir_entries: []DirEntry, rect: rl.Rectangle) void 
         const z = s / w;
         for (0..row.items.len) |j| {
             const d = row_weights.items[j] / z;
+            const color = row_colors.items[j];
             if (vertical) {
-                rl.drawRectangleLinesEx(.{ .x = rx, .y = ry, .width = z, .height = d }, 5, rl.Color.magenta);
+                const rec = .{ .x = rx, .y = ry, .width = z, .height = d };
+                rl.drawRectangleRec(rec, color);
+                rl.drawRectangleLinesEx(rec, 5, rl.Color.light_gray);
                 // createRectangle(rx,ry,z,d,row[j]);
                 ry = ry + d;
             } else {
                 // createRectangle(rx,ry,d,z,row[j]);
-                rl.drawRectangleLinesEx(.{ .x = rx, .y = ry, .width = d, .height = z }, 5, rl.Color.magenta);
+                const rec = .{ .x = rx, .y = ry, .width = d, .height = z };
+                rl.drawRectangleRec(rec, color);
+                rl.drawRectangleLinesEx(rec, 5, rl.Color.light_gray);
                 rx = rx + d;
             }
         }
@@ -398,6 +412,7 @@ fn squarify(alloc: Allocator, dir_entries: []DirEntry, rect: rl.Rectangle) void 
         w = if (vertical) rh else rw;
         row.clearRetainingCapacity();
         row_weights.clearRetainingCapacity();
+        row_colors.clearRetainingCapacity();
     }
 }
 
@@ -408,4 +423,61 @@ fn fmt_file_size(alloc: Allocator, bytes: u64) [:0]const u8 {
 fn round_to_decimal_places(value: f64, decimal_places: usize) f64 {
     const factor = std.math.pow(f64, 10.0, @floatFromInt(decimal_places));
     return std.math.round(value * factor) / factor;
+}
+
+fn hcl_to_rgb(h: f32, c: f32, l: f32) rl.Color {
+    const math = std.math;
+
+    const a1 = c * math.cos(h * math.pi / 180);
+    const b1 = c * math.sin(h * math.pi / 180);
+
+    const L = (l * 255) / 100;
+    const A = a1 + 128;
+    const B = b1 + 128;
+
+    var y = (L + 16) / 116;
+    var x = y + A / 500;
+    var z = y - B / 200;
+
+    x = 0.95047 * (if (x * x * x > 0.008856) x * x * x else (x - 16 / 116) / 7.787);
+    y = 1.00000 * (if (y * y * y > 0.008856) y * y * y else (y - 16 / 116) / 7.787);
+    z = 1.08883 * (if (z * z * z > 0.008856) z * z * z else (z - 16 / 116) / 7.787);
+
+    var r = x * 3.2406 + y * -1.5372 + z * -0.4986;
+    var g = x * -0.9689 + y * 1.8758 + z * 0.0415;
+    var b = x * 0.0557 + y * -0.2040 + z * 1.0570;
+
+    r = @floatCast(if (r > 0.0031308) (1.055 * std.math.pow(f64, r, 1.0 / 2.4) - 0.055) else 12.92 * r);
+    g = @floatCast(if (g > 0.0031308) (1.055 * std.math.pow(f64, g, 1.0 / 2.4) - 0.055) else 12.92 * g);
+    b = @floatCast(if (b > 0.0031308) (1.055 * std.math.pow(f64, b, 1.0 / 2.4) - 0.055) else 12.92 * b);
+
+    const a = 1.0;
+
+    r = @max(0, @min(r, 1.0));
+    g = @max(0, @min(g, 1.0));
+    b = @max(0, @min(b, 1.0));
+
+    return rl.Color.fromNormalized(.{
+        .x = r,
+        .y = g,
+        .z = b,
+        .w = a,
+    });
+}
+
+fn generate_palette(alloc: Allocator, count_int: usize) ![]rl.Color {
+    const palette = try alloc.alloc(rl.Color, count_int);
+    const count: f32 = @floatFromInt(count_int);
+    const hue_step = 360.0 / count;
+    var h: f32 = 0.0;
+
+    for (0..count_int) |i| {
+        const c: f32 = 60.0 + @as(f32, @floatFromInt(i)) / (count - 1) * 40.0;
+        const l: f32 = 70.0 - @as(f32, @floatFromInt(i)) / (count - 1) * 40.0;
+        const color = hcl_to_rgb(h, c, l);
+        palette[i] = color;
+        h += hue_step;
+    }
+
+    return palette;
 }
