@@ -6,11 +6,7 @@ const Allocator = std.mem.Allocator;
 const rl = @import("raylib");
 const rgui = @import("raygui");
 
-const WORKER_THREAD_COUNT_MAX = 4;
-
 pub fn main() anyerror!void {
-    // Initialization
-    //--------------------------------------------------------------------------------------
     const screenWidth = 600;
     const screenHeight = 800;
 
@@ -21,13 +17,9 @@ pub fn main() anyerror!void {
         .window_topmost = false,
     });
     rl.initWindow(screenWidth, screenHeight, "CHONK");
-    defer rl.closeWindow(); // Close window and OpenGL context
+    defer rl.closeWindow();
 
-    rl.setTargetFPS(60); // Set our game to run at 60 frames-per-second
-    //--------------------------------------------------------------------------------------
-
-    std.debug.print("INFO path_size_bytes: {d}\n", .{std.fs.max_path_bytes});
-
+    rl.setTargetFPS(60);
     const alloc_state = std.heap.page_allocator;
 
     var frame_arena = std.heap.ArenaAllocator.init(alloc_state);
@@ -42,7 +34,6 @@ pub fn main() anyerror!void {
             fs_store: lib.FS_Store = undefined,
             scroll_state: rl.Vector2 = undefined,
             scroll_view: rl.Rectangle = undefined,
-            dir_entries: DirEntriesThreadState = .{},
             dbg: struct {
                 files_indexed: u64 = 0,
                 files_indexed_prev: u64 = 0,
@@ -280,7 +271,7 @@ pub fn main() anyerror!void {
                     const size_text_size = rl.measureTextEx(font, size_text, path_font_size, 0);
                     rl.drawText(
                         size_text,
-                        @intFromFloat(scroll_bounds.x + scroll_bounds.width - size_text_size.x - 50),
+                        @intFromFloat(scroll_bounds.x + scroll_bounds.width - size_text_size.x - 75),
                         @intFromFloat(path_y),
                         path_font_size,
                         rl.Color.black,
@@ -408,66 +399,6 @@ fn squarify(alloc: Allocator, dir_entries: []DirEntry, rect: rl.Rectangle) void 
         row.clearRetainingCapacity();
         row_weights.clearRetainingCapacity();
     }
-}
-
-const DirEntriesThreadState = struct {
-    data: []lib.DB.Entry = &.{},
-    thread: ?Thread = null,
-    data_mutex: Thread.Mutex = Thread.Mutex{},
-    alive_mutex: Thread.Mutex = Thread.Mutex{},
-    arenas: ArenaPair = .{
-        .a = std.heap.ArenaAllocator.init(std.heap.page_allocator),
-        .b = std.heap.ArenaAllocator.init(std.heap.page_allocator),
-    },
-
-    const ArenaPair = struct {
-        a: std.heap.ArenaAllocator,
-        b: std.heap.ArenaAllocator,
-    };
-};
-
-fn dir_entries_thread_impl(state: *DirEntriesThreadState, path: []const u8, connection_pool: *lib.sqlite.Pool) void {
-    const conn = connection_pool.acquire();
-    defer connection_pool.release(conn);
-
-    defer state.arenas.a.deinit();
-    defer state.arenas.b.deinit();
-
-    while (!state.alive_mutex.tryLock()) {
-        // const time_now = std.time.nanoTimestamp();
-        const new_data = lib.DB.entries_get_direct_children_of(conn, state.arenas.b.allocator(), path) catch |err| {
-            std.debug.print("ERROR: failed to retrieve dir entries: {any}\n", .{err});
-            continue;
-        };
-        // const time_end = std.time.nanoTimestamp();
-        // std.debug.print("INFO: query took {d}ms\n", .{
-        //     @divTrunc(time_end - time_now, std.time.ns_per_ms),
-        // });
-        // atomic_swap:
-        {
-            state.data_mutex.lock();
-            defer state.data_mutex.unlock();
-            state.data = new_data;
-        }
-        std.mem.swap(std.heap.ArenaAllocator, &state.arenas.a, &state.arenas.b);
-        _ = state.arenas.b.reset(.retain_capacity);
-        // std.time.sleep(500 * std.time.ns_per_ms);
-        // Thread.yield() catch continue;
-    }
-    state.alive_mutex.unlock();
-}
-
-fn error_log_callback(_: *allowzero anyopaque, error_code: c_int, msg: [*:0]const u8) callconv(.C) void {
-    std.debug.print("ERROR(SQLITE_LOG): {d} {s}\n", .{ error_code, msg });
-}
-
-fn pad(rect: rl.Rectangle, x: f32, y: f32) rl.Rectangle {
-    return rl.Rectangle{
-        .x = rect.x + x,
-        .y = rect.y + y,
-        .height = rect.height - y,
-        .width = rect.width - x,
-    };
 }
 
 fn fmt_file_size(alloc: Allocator, bytes: u64) [:0]const u8 {
