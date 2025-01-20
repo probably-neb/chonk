@@ -2,7 +2,6 @@ const std = @import("std");
 const lib = @import("root.zig");
 const Thread = std.Thread;
 const Allocator = std.mem.Allocator;
-const c = @cImport(@cInclude("sqlite3.h"));
 
 const rl = @import("raylib");
 const rgui = @import("raygui");
@@ -197,19 +196,6 @@ pub fn main() anyerror!void {
                     break :label @as(i32, @intFromFloat(label_size.y)) + label_top_pad + 20;
                 };
 
-                const DirEntry = struct {
-                    name: [:0]const u8,
-                    size_bytes: u64,
-
-                    const DirEntry = @This();
-
-                    fn gt_than(_: void, lhs: DirEntry, rhs: DirEntry) bool {
-                        if (lhs.size_bytes == rhs.size_bytes) {
-                            return std.mem.lessThan(u8, lhs.name, rhs.name);
-                        }
-                        return lhs.size_bytes > rhs.size_bytes;
-                    }
-                };
                 const dir_entries: []DirEntry = blk: {
                     const store = viewer_data.fs_store;
                     const root = store.root_entry_ptr;
@@ -241,7 +227,7 @@ pub fn main() anyerror!void {
                 const window_width_f32: f32 = @floatFromInt(window_width);
                 const window_height_f32: f32 = @floatFromInt(rl.getRenderHeight());
                 const scroll_width = window_width_f32 * 0.8;
-                const scroll_height = window_height_f32 - @as(f32, @floatFromInt(label_height)) - 100;
+                const scroll_height = (window_height_f32 - @as(f32, @floatFromInt(label_height)) - 100) / 2;
 
                 const scroll_bounds = rl.Rectangle{
                     .x = (window_width_f32 / 2) - (scroll_width / 2),
@@ -276,7 +262,7 @@ pub fn main() anyerror!void {
                     @intFromFloat(viewer_data.scroll_view.width),
                     @intFromFloat(viewer_data.scroll_view.height),
                 );
-                const path_x = scroll_bounds.x;
+                const path_x = scroll_bounds.x + 25;
 
                 rgui.guiSetStyle(.default, rgui.GuiDefaultProperty.text_size, path_font_size);
 
@@ -301,8 +287,126 @@ pub fn main() anyerror!void {
                     );
                 }
                 rl.endScissorMode();
+
+                {
+                    const tree_view_rect: rl.Rectangle = .{
+                        .x = (window_width_f32 / 2) - (scroll_width / 2),
+                        .y = scroll_bounds.y + scroll_bounds.height + 50,
+                        .width = scroll_width,
+                        .height = window_height_f32 - scroll_bounds.y - scroll_bounds.height - 100,
+                    };
+                    rl.drawRectangleRec(tree_view_rect, rl.Color.fade(rl.Color.red, 0.1));
+                    squarify(frame_arena_alloc, dir_entries, tree_view_rect);
+                }
             },
         }
+    }
+}
+const DirEntry = struct {
+    name: [:0]const u8,
+    size_bytes: u64,
+
+    fn gt_than(_: void, lhs: DirEntry, rhs: DirEntry) bool {
+        if (lhs.size_bytes == rhs.size_bytes) {
+            return std.mem.lessThan(u8, lhs.name, rhs.name);
+        }
+        return lhs.size_bytes > rhs.size_bytes;
+    }
+};
+
+fn squarify(alloc: Allocator, dir_entries: []DirEntry, rect: rl.Rectangle) void {
+    // TODO: scaleWeights?
+    // this.scaleWeights(nodes, width, height);
+    std.debug.assert(std.sort.isSorted(DirEntry, dir_entries, {}, DirEntry.gt_than));
+    const util = struct {
+        fn sum(row: []f32) f32 {
+            var sum_: f32 = 0;
+            for (row) |d| {
+                sum_ += d;
+            }
+            return sum_;
+        }
+        fn min(row: []f32) f32 {
+            var min_: f32 = std.math.floatMax(f32);
+            for (row) |d| {
+                min_ = @min(min_, d);
+            }
+            return min_;
+        }
+        fn max(row: []f32) f32 {
+            var max_: f32 = 0;
+            for (row) |d| {
+                max_ = @max(max_, d);
+            }
+            return max_;
+        }
+
+        fn worst(s: f32, min_: f32, max_: f32, w: f32) f32 {
+            return @max((w * w * max_) / (s * s), (s * s) / (w * w * min_));
+        }
+    };
+    const weights = alloc.alloc(f32, dir_entries.len) catch unreachable;
+    {
+        var sum_: f32 = 0;
+        for (dir_entries) |d| {
+            sum_ += @floatFromInt(d.size_bytes);
+        }
+
+        const scale = (rect.width * rect.height) / sum_;
+        for (dir_entries, weights) |d, *w| {
+            w.* = scale * @as(f32, @floatFromInt(d.size_bytes));
+        }
+    }
+    var vertical = rect.height < rect.width;
+    var w = if (vertical) rect.height else rect.width;
+    var x = rect.x;
+    var y = rect.y;
+    var rw = rect.width;
+    var rh = rect.height;
+    var row = std.ArrayList(DirEntry).initCapacity(alloc, dir_entries.len) catch unreachable;
+    var row_weights = std.ArrayList(f32).initCapacity(alloc, dir_entries.len) catch unreachable;
+    var i: u32 = 0;
+    while (i < dir_entries.len) {
+        const c = dir_entries[i];
+        const r: f32 = weights[i];
+        const s = util.sum(row_weights.items);
+        const min = util.min(row_weights.items);
+        const max = util.max(row_weights.items);
+        const wit = util.worst(s + r, @min(min, r), @max(max, r), w);
+        const without = util.worst(s, min, max, w);
+        if (row.items.len == 0 or wit < without) {
+            row.appendAssumeCapacity(c);
+            row_weights.appendAssumeCapacity(r);
+            i += 1;
+            continue;
+        }
+        var rx = x;
+        var ry = y;
+        const z = s / w;
+        for (0..row.items.len) |j| {
+            const d = row_weights.items[j] / z;
+            if (vertical) {
+                rl.drawRectangleLinesEx(.{ .x = rx, .y = ry, .width = z, .height = d }, 5, rl.Color.magenta);
+                // createRectangle(rx,ry,z,d,row[j]);
+                ry = ry + d;
+            } else {
+                // createRectangle(rx,ry,d,z,row[j]);
+                rl.drawRectangleLinesEx(.{ .x = rx, .y = ry, .width = d, .height = z }, 5, rl.Color.magenta);
+                rx = rx + d;
+            }
+        }
+        if (vertical) {
+            x = x + z;
+            rw = rw - z;
+        } else {
+            y = y + z;
+            rh = rh - z;
+        }
+
+        vertical = rh < rw;
+        w = if (vertical) rh else rw;
+        row.clearRetainingCapacity();
+        row_weights.clearRetainingCapacity();
     }
 }
 
