@@ -212,37 +212,38 @@ pub fn main() anyerror!void {
                     std.sort.insertion(DirEntry, dir_entries, {}, DirEntry.gt_than);
                     break :blk dir_entries;
                 };
+                const window_width_f32: f32 = @floatFromInt(window_width);
+                const window_height_f32: f32 = @floatFromInt(rl.getRenderHeight());
 
+                const content_rect: rl.Rectangle = pad(.{
+                    .x = 0,
+                    .y = @floatFromInt(label_height),
+                    .width = window_width_f32,
+                    .height = window_height_f32 - @as(f32, @floatFromInt(label_height)),
+                }, .{ .x = 50, .y = 25 });
+                const scroll_rect, const tree_view_rect = divide_in_2_with_padding(
+                    content_rect,
+                    25,
+                );
                 // std.debug.print("FOUND {d} entries\n", .{dir_entries.len});
 
                 const path_font_size = 32;
                 const path_height = 60;
 
-                const window_width_f32: f32 = @floatFromInt(window_width);
-                const window_height_f32: f32 = @floatFromInt(rl.getRenderHeight());
-                const scroll_width = window_width_f32 * 0.8;
-                const scroll_height = (window_height_f32 - @as(f32, @floatFromInt(label_height)) - 100) / 2;
-
-                const scroll_bounds = rl.Rectangle{
-                    .x = (window_width_f32 / 2) - (scroll_width / 2),
-                    .y = @floatFromInt(label_height + 50),
-                    .height = scroll_height,
-                    .width = scroll_width,
-                };
                 const scroll_content = rl.Rectangle{
                     .x = 0,
                     .y = 0,
-                    .width = scroll_width,
+                    .width = scroll_rect.width,
                     .height = @floatFromInt(dir_entries.len * path_height),
                 };
 
-                _ = rgui.guiScrollPanel(scroll_bounds, null, scroll_content, &viewer_data.scroll_state, &viewer_data.scroll_view);
+                _ = rgui.guiScrollPanel(scroll_rect, null, scroll_content, &viewer_data.scroll_state, &viewer_data.scroll_view);
 
                 const showScrollBounds = false;
                 if (showScrollBounds) {
                     rl.drawRectangleRec(.{
-                        .x = scroll_bounds.x + viewer_data.scroll_state.x,
-                        .y = scroll_bounds.y + viewer_data.scroll_state.y,
+                        .x = scroll_rect.x + viewer_data.scroll_state.x,
+                        .y = scroll_rect.y + viewer_data.scroll_state.y,
                         .width = scroll_content.width,
                         .height = scroll_content.height,
                     }, rl.Color.fade(rl.Color.gold, 0.1));
@@ -256,12 +257,12 @@ pub fn main() anyerror!void {
                     @intFromFloat(viewer_data.scroll_view.width),
                     @intFromFloat(viewer_data.scroll_view.height),
                 );
-                const path_x = scroll_bounds.x + 25;
+                const path_x = scroll_rect.x + 25;
 
                 rgui.guiSetStyle(.default, rgui.GuiDefaultProperty.text_size, path_font_size);
 
                 for (dir_entries, 0..) |file, i| {
-                    const path_y = scroll_bounds.y + @as(f32, @floatFromInt((i * path_height))) + viewer_data.scroll_state.y; // 30 pixels spacing between lines
+                    const path_y = scroll_rect.y + @as(f32, @floatFromInt((i * path_height))) + viewer_data.scroll_state.y; // 30 pixels spacing between lines
                     rl.drawText(
                         file.name,
                         @intFromFloat(path_x),
@@ -274,7 +275,7 @@ pub fn main() anyerror!void {
                     const size_text_size = rl.measureTextEx(font, size_text, path_font_size, 0);
                     rl.drawText(
                         size_text,
-                        @intFromFloat(scroll_bounds.x + scroll_bounds.width - size_text_size.x - 75),
+                        @intFromFloat(scroll_rect.x + scroll_rect.width - size_text_size.x - 75),
                         @intFromFloat(path_y),
                         path_font_size,
                         rl.Color.black,
@@ -282,16 +283,7 @@ pub fn main() anyerror!void {
                 }
                 rl.endScissorMode();
 
-                {
-                    const tree_view_rect: rl.Rectangle = .{
-                        .x = (window_width_f32 / 2) - (scroll_width / 2),
-                        .y = scroll_bounds.y + scroll_bounds.height + 50,
-                        .width = scroll_width,
-                        .height = window_height_f32 - scroll_bounds.y - scroll_bounds.height - 100,
-                    };
-                    rl.drawRectangleRec(tree_view_rect, rl.Color.fade(rl.Color.red, 0.1));
-                    squarify(frame_arena_alloc, dir_entries, tree_view_rect);
-                }
+                squarify(frame_arena_alloc, dir_entries, tree_view_rect);
             },
         }
     }
@@ -393,10 +385,8 @@ fn squarify(alloc: Allocator, dir_entries: []DirEntry, rect: rl.Rectangle) void 
                 const rec = .{ .x = rx, .y = ry, .width = z, .height = d };
                 rl.drawRectangleRec(rec, color);
                 rl.drawRectangleLinesEx(rec, 3, rl.Color.light_gray);
-                // createRectangle(rx,ry,z,d,row[j]);
                 ry = ry + d;
             } else {
-                // createRectangle(rx,ry,d,z,row[j]);
                 const rec = .{ .x = rx, .y = ry, .width = d, .height = z };
                 rl.drawRectangleRec(rec, color);
                 rl.drawRectangleLinesEx(rec, 3, rl.Color.light_gray);
@@ -426,6 +416,37 @@ fn fmt_file_size(alloc: Allocator, bytes: u64) [:0]const u8 {
 fn round_to_decimal_places(value: f64, decimal_places: usize) f64 {
     const factor = std.math.pow(f64, 10.0, @floatFromInt(decimal_places));
     return std.math.round(value * factor) / factor;
+}
+
+fn pad(original: rl.Rectangle, padding: rl.Vector2) rl.Rectangle {
+    var rect = original;
+    rect.x += padding.x;
+    rect.width -= padding.x * 2;
+    rect.y += padding.y;
+    rect.height -= padding.y * 2;
+    return rect;
+}
+
+fn divide_in_2_with_padding(rect: rl.Rectangle, padding: f32) struct { rl.Rectangle, rl.Rectangle } {
+    const vertical = rect.height > rect.width;
+    var left = rect;
+    var right = rect;
+    if (vertical) {
+        left.height /= 2;
+        right.y += left.height;
+        right.height = left.height;
+        left.height -= padding;
+        right.y += padding;
+        right.height -= padding;
+    } else {
+        left.width /= 2;
+        right.x += left.width;
+        right.width = left.width;
+        left.width -= padding;
+        right.x += padding;
+        right.width -= padding;
+    }
+    return .{ left, right };
 }
 
 /// RGB color structure with values between 0 and 1
