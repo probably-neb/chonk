@@ -169,7 +169,6 @@ pub fn main() anyerror!void {
                         page_current = .{ .select = .{
                             .paths = null,
                         } };
-                        // tell worker thread to go die
                         break :frame;
                     }
                 }
