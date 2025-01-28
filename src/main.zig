@@ -233,29 +233,6 @@ pub fn main() anyerror!void {
                 });
             },
             .viewer => |*viewer_data| frame: {
-                const show_dbg_info = true;
-                defer if (show_dbg_info) dbg: {
-                    const frame_rate = rl.getFPS();
-                    const frame_time = rl.getFrameTime();
-
-                    const files_per_second = @as(f64, @floatFromInt(viewer_data.dbg.files_indexed -| viewer_data.dbg.files_indexed_prev)) / frame_time;
-                    viewer_data.dbg.files_indexed_prev = viewer_data.dbg.files_indexed;
-
-                    const debug_text_size = 32;
-
-                    rgui.guiSetStyle(.default, rgui.GuiDefaultProperty.text_size, debug_text_size);
-
-                    const dbg_text = std.fmt.allocPrintZ(frame_arena_alloc, "FPS={: >4} | FT={: >4}ms | IDX={: >5}/s | FILES={}", .{
-                        frame_rate,
-                        round_to_decimal_places(frame_time / std.time.ms_per_s, 5),
-                        round_to_decimal_places(files_per_second, 5),
-                        viewer_data.dbg.files_indexed,
-                    }) catch {
-                        break :dbg;
-                    };
-                    rl.drawText(dbg_text, 0, rl.getRenderHeight() - debug_text_size - 5, debug_text_size, rl.Color.black);
-                };
-
                 const window_width = rl.getRenderWidth();
 
                 {
@@ -552,6 +529,35 @@ pub fn main() anyerror!void {
                     }
                 },
             }
+        }
+
+        const show_dbg_info = true;
+        if (show_dbg_info) dbg: {
+            const frame_rate = rl.getFPS();
+            const frame_time = rl.getFrameTime();
+
+            const files_per_second, const files_total = switch (page_current) {
+                .viewer => |*viewer_data| fps: {
+                    const files_per_second = @as(f64, @floatFromInt(viewer_data.dbg.files_indexed -| viewer_data.dbg.files_indexed_prev)) / frame_time;
+                    viewer_data.dbg.files_indexed_prev = viewer_data.dbg.files_indexed;
+                    break :fps .{ files_per_second, viewer_data.dbg.files_indexed };
+                },
+                .select => .{ 0, 0 },
+            };
+
+            const debug_text_size = 32;
+
+            rgui.guiSetStyle(.default, rgui.GuiDefaultProperty.text_size, debug_text_size);
+
+            const dbg_text = std.fmt.allocPrintZ(frame_arena_alloc, "FPS={: >4} | FT={: >4}ms | IDX={: >5}/s | FILES={}", .{
+                frame_rate,
+                round_to_decimal_places(frame_time / std.time.ms_per_s, 5),
+                round_to_decimal_places(files_per_second, 5),
+                files_total,
+            }) catch {
+                break :dbg;
+            };
+            rl.drawText(dbg_text, 0, rl.getRenderHeight() - debug_text_size - 5, debug_text_size, rl.Color.black);
         }
     }
 }
