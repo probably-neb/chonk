@@ -7,6 +7,10 @@ const colormaps = @import("colormaps.zig");
 
 const rl = @import("raylib");
 const rgui = @import("raygui");
+const clay = @import("zclay");
+
+const FONT_COUNT = 1;
+var fonts: [FONT_COUNT]rl.Font = undefined;
 
 pub fn main() anyerror!void {
     const screenWidth = 600;
@@ -23,6 +27,15 @@ pub fn main() anyerror!void {
 
     rl.setTargetFPS(60);
     const alloc_state = std.heap.page_allocator;
+
+    fonts[0] = try rl.getFontDefault();
+
+    const clay_min_mem_amount: u32 = clay.minMemorySize();
+    const clay_memory = try alloc_state.alloc(u8, clay_min_mem_amount);
+    const clay_arena: clay.Arena = clay.createArenaWithCapacityAndMemory(clay_memory);
+    _ = clay.initialize(clay_arena, .{ .h = screenHeight, .w = screenWidth }, .{});
+
+    clay.setMeasureTextFunction(clay_measure_text);
 
     var frame_arena = std.heap.ArenaAllocator.init(alloc_state);
     const frame_arena_alloc = frame_arena.allocator();
@@ -47,17 +60,37 @@ pub fn main() anyerror!void {
         .select = .{},
     };
 
-    const font = try rl.getFontDefault();
+    const font_default = try rl.getFontDefault();
 
     // Main game loop
     while (!rl.windowShouldClose()) { // Detect window close button or ESC key
         // TODO: max water mark
         defer _ = frame_arena.reset(.retain_capacity);
-
         rl.beginDrawing();
         defer rl.endDrawing();
 
+        clay.setLayoutDimensions(.{
+            .w = @floatFromInt(rl.getRenderWidth()),
+            .h = @floatFromInt(rl.getRenderHeight()),
+        });
+        const pointer_pos = rl.getMousePosition();
+        clay.setPointerState(
+            .{
+                .x = pointer_pos.x,
+                .y = pointer_pos.y,
+            },
+            rl.isMouseButtonDown(.left),
+        );
+
+        const scroll_delta = rl.getMouseWheelMoveV();
+        clay.updateScrollContainers(true, .{
+            .x = scroll_delta.x,
+            .y = scroll_delta.y,
+        }, rl.getFrameTime());
+
         rl.clearBackground(rl.Color.white);
+
+        clay.beginLayout();
 
         switch (page_current) {
             .select => |*select_data| frame: {
@@ -72,7 +105,7 @@ pub fn main() anyerror!void {
                 const label_height: i32 = label: {
                     const label: [*:0]const u8 = "Select Path or Drive to View";
                     const label_font_size = 48;
-                    const label_size = rl.measureTextEx(font, label, label_font_size, 0.1);
+                    const label_size = rl.measureTextEx(font_default, label, label_font_size, 0.1);
                     const label_top_pad = 10;
 
                     rl.drawText(
@@ -117,7 +150,12 @@ pub fn main() anyerror!void {
                             page_current = page_prev;
                             break :frame;
                         };
-                        const thread = Thread.spawn(.{}, lib.index_paths_starting_with, .{ page_current.viewer.path, alloc_state, &page_current.viewer.fs_store, &page_current.viewer.dbg.files_indexed }) catch |err| {
+                        const thread = Thread.spawn(.{}, lib.index_paths_starting_with, .{
+                            page_current.viewer.path,
+                            alloc_state,
+                            &page_current.viewer.fs_store,
+                            &page_current.viewer.dbg.files_indexed,
+                        }) catch |err| {
                             std.debug.print("ERROR: failed to spawn worker thread: {any}\n", .{err});
                             // viewer_data.worker_thread_pool_running.reset();
                             // viewer_data.worker_thread_pool.deinit();
@@ -176,7 +214,7 @@ pub fn main() anyerror!void {
                 const label_height: i32 = label: {
                     const label: [*:0]const u8 = viewer_data.path;
                     const label_font_size = 48;
-                    const label_size = rl.measureTextEx(font, label, label_font_size, 0.1);
+                    const label_size = rl.measureTextEx(font_default, label, label_font_size, 0.1);
                     const label_top_pad = 10;
 
                     rl.drawText(
@@ -271,7 +309,7 @@ pub fn main() anyerror!void {
                     );
                     const size_text = fmt_file_size(frame_arena_alloc, file.size_bytes);
                     // std.debug.print("{s} size text {s}\n", .{ file.abs_path, size_text });
-                    const size_text_size = rl.measureTextEx(font, size_text, path_font_size, 0);
+                    const size_text_size = rl.measureTextEx(font_default, size_text, path_font_size, 0);
                     rl.drawText(
                         size_text,
                         @intFromFloat(scroll_rect.x + scroll_rect.width - size_text_size.x - 75),
@@ -284,6 +322,166 @@ pub fn main() anyerror!void {
 
                 squarify(frame_arena_alloc, dir_entries, tree_view_rect);
             },
+        }
+
+        var ui_draw_commands: clay.ClayArray(clay.RenderCommand) = clay.endLayout();
+
+        for (0..ui_draw_commands.length) |i| {
+            const render_command = clay.renderCommandArrayGet(&ui_draw_commands, @intCast(i));
+            const render_text = render_command.text.chars[0..@abs(render_command.text.length)];
+            const bounding_box = render_command.bounding_box;
+            const rec = .{
+                .x = bounding_box.x,
+                .y = bounding_box.y,
+                .width = bounding_box.width,
+                .height = bounding_box.height,
+            };
+            switch (render_command.command_type) {
+                .none => {},
+                .text => {
+                    const config = render_command.config.text_config;
+                    const font = fonts[config.font_id];
+
+                    rl.drawTextEx(
+                        font,
+                        try frame_arena_alloc.dupeZ(u8, render_text),
+                        .{ .x = bounding_box.x, .y = bounding_box.y },
+                        @floatFromInt(config.font_size),
+                        @floatFromInt(config.letter_spacing),
+                        rl_color_from_arr(config.color),
+                    );
+                },
+                .rectangle => {
+                    const config = render_command.config.rectangle_config;
+                    if (config.corner_radius.top_left > 0) {
+                        const radius = (config.corner_radius.top_left * 2) / @max(bounding_box.width, bounding_box.height);
+                        rl.drawRectangleRounded(
+                            rec,
+                            radius,
+                            8,
+                            rl_color_from_arr(config.color),
+                        );
+                    } else {
+                        rl.drawRectangleRec(
+                            rec,
+                            rl_color_from_arr(config.color),
+                        );
+                    }
+                },
+                .border => {
+                    const config = render_command.config.border_config;
+                    // Left border
+                    if (config.left.width > 0) {
+                        rl.drawRectangle(
+                            @intFromFloat(@round(bounding_box.x)),
+                            @intFromFloat(@round(bounding_box.y + config.corner_radius.top_left)),
+                            @intCast(config.left.width),
+                            @intFromFloat(@round(bounding_box.height - config.corner_radius.top_left - config.corner_radius.bottom_left)),
+                            rl_color_from_arr(config.left.color),
+                        );
+                    }
+                    // Right border
+                    if (config.right.width > 0) {
+                        rl.drawRectangle(
+                            @intFromFloat(@round(bounding_box.x + bounding_box.width - @as(f32, @floatFromInt(config.right.width)))),
+                            @intFromFloat(@round(bounding_box.y + config.corner_radius.top_right)),
+                            @intCast(config.right.width),
+                            @intFromFloat(@round(bounding_box.height - config.corner_radius.top_right - config.corner_radius.bottom_right)),
+                            rl_color_from_arr(config.right.color),
+                        );
+                    }
+                    // Top border
+                    if (config.top.width > 0) {
+                        rl.drawRectangle(
+                            @intFromFloat(@round(bounding_box.x + config.corner_radius.top_left)),
+                            @intFromFloat(@round(bounding_box.y)),
+                            @intFromFloat(@round(bounding_box.width - config.corner_radius.top_left - config.corner_radius.top_right)),
+                            @intCast(config.top.width),
+                            rl_color_from_arr(config.top.color),
+                        );
+                    }
+                    // Bottom border
+                    if (config.bottom.width > 0) {
+                        rl.drawRectangle(
+                            @intFromFloat(@round(bounding_box.x + config.corner_radius.bottom_left)),
+                            @intFromFloat(@round(bounding_box.y + bounding_box.height - @as(f32, @floatFromInt(config.bottom.width)))),
+                            @intFromFloat(@round(bounding_box.width - config.corner_radius.bottom_left - config.corner_radius.bottom_right)),
+                            @intCast(config.bottom.width),
+                            rl_color_from_arr(config.bottom.color),
+                        );
+                    }
+                    // Corner rings
+                    if (config.corner_radius.top_left > 0) {
+                        rl.drawRing(
+                            .{
+                                .x = @round(bounding_box.x + config.corner_radius.top_left),
+                                .y = @round(bounding_box.y + config.corner_radius.top_left),
+                            },
+                            @round(config.corner_radius.top_left - @as(f32, @floatFromInt(config.top.width))),
+                            config.corner_radius.top_left,
+                            180,
+                            270,
+                            10,
+                            rl_color_from_arr(config.top.color),
+                        );
+                    }
+                    if (config.corner_radius.top_right > 0) {
+                        rl.drawRing(
+                            .{
+                                .x = @round(bounding_box.x + bounding_box.width - config.corner_radius.top_right),
+                                .y = @round(bounding_box.y + config.corner_radius.top_right),
+                            },
+                            @round(config.corner_radius.top_right - @as(f32, @floatFromInt(config.top.width))),
+                            config.corner_radius.top_right,
+                            270,
+                            360,
+                            10,
+                            rl_color_from_arr(config.top.color),
+                        );
+                    }
+                    if (config.corner_radius.bottom_left > 0) {
+                        rl.drawRing(
+                            .{
+                                .x = @round(bounding_box.x + config.corner_radius.bottom_left),
+                                .y = @round(bounding_box.y + bounding_box.height - config.corner_radius.bottom_left),
+                            },
+                            @round(config.corner_radius.bottom_left - @as(f32, @floatFromInt(config.top.width))),
+                            config.corner_radius.bottom_left,
+                            90,
+                            180,
+                            10,
+                            rl_color_from_arr(config.bottom.color),
+                        );
+                    }
+                    if (config.corner_radius.bottom_right > 0) {
+                        rl.drawRing(
+                            .{
+                                .x = @round(bounding_box.x + bounding_box.width - config.corner_radius.bottom_right),
+                                .y = @round(bounding_box.y + bounding_box.height - config.corner_radius.bottom_right),
+                            },
+                            @round(config.corner_radius.bottom_right - @as(f32, @floatFromInt(config.bottom.width))),
+                            config.corner_radius.bottom_right,
+                            0.1,
+                            90,
+                            10,
+                            rl_color_from_arr(config.bottom.color),
+                        );
+                    }
+                },
+                .scissor_start => {
+                    rl.beginScissorMode(
+                        @intFromFloat(bounding_box.x),
+                        @intFromFloat(bounding_box.y),
+                        @intFromFloat(bounding_box.width),
+                        @intFromFloat(bounding_box.height),
+                    );
+                },
+                .scissor_end => {
+                    rl.endScissorMode();
+                },
+                .image => unreachable,
+                .custom => unreachable,
+            }
         }
     }
 }
@@ -562,4 +760,74 @@ pub fn generate_palette(
     }
 
     return colors;
+}
+
+fn clay_measure_text(text: []const u8, ctx: *clay.TextElementConfig) clay.Dimensions {
+    var textSize: clay.Dimensions = .{ .w = 0, .h = 0 };
+
+    const size = text.len;
+
+    var tempByteCounter: u32 = 0; // Used to count longer text line num chars
+    var byteCounter: u32 = 0;
+
+    var textWidth: f32 = 0.0;
+    var tempTextWidth: f32 = 0.0; // Used to count longer text line width
+
+    const font = fonts[ctx.font_id];
+
+    const font_size: f32 = @floatFromInt(ctx.font_size);
+    var textHeight: f32 = font_size;
+    const scaleFactor: f32 = font_size / @as(f32, @floatFromInt(font.baseSize));
+    const line_spacing: f32 = @as(f32, @floatFromInt(ctx.line_height)) - textHeight;
+
+    var letter: i32 = 0;
+    var index: u32 = 0;
+
+    var i: i32 = 0;
+    while (i < size) {
+        byteCounter += 1;
+
+        var codepointByteCount: i32 = 0;
+        letter = rl.getCodepointNext(@ptrCast(&text[@abs(i)]), &codepointByteCount);
+        index = @intCast(rl.getGlyphIndex(font, letter));
+
+        i += codepointByteCount;
+
+        if (letter != '\n') {
+            if (font.glyphs[index].advanceX > 0) {
+                textWidth += @floatFromInt(font.glyphs[index].advanceX);
+            } else {
+                textWidth += font.recs[index].width + @as(f32, @floatFromInt(font.glyphs[index].offsetX));
+            }
+        } else {
+            tempTextWidth = @max(tempTextWidth, textWidth);
+            byteCounter = 0;
+            textWidth = 0;
+
+            // NOTE(raylib): Line spacing is a global variable, use SetTextLineSpacing() to setup
+            textHeight += font_size + line_spacing;
+        }
+
+        if (tempByteCounter < byteCounter) tempByteCounter = byteCounter;
+    }
+
+    if (tempTextWidth < textWidth) tempTextWidth = textWidth;
+
+    textSize.w = tempTextWidth * scaleFactor + @as(f32, @floatFromInt((tempByteCounter - 1) * ctx.letter_spacing));
+    textSize.h = textHeight;
+
+    return textSize;
+}
+
+fn rl_color_to_arr(color: rl.Color) [4]u8 {
+    return .{ color.r, color.g, color.b, color.a };
+}
+
+fn rl_color_from_arr(arr: [4]f32) rl.Color {
+    return .{
+        .r = @intFromFloat(arr[0]),
+        .g = @intFromFloat(arr[1]),
+        .b = @intFromFloat(arr[2]),
+        .a = @intFromFloat(arr[3]),
+    };
 }

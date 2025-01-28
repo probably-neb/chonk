@@ -27,9 +27,8 @@
             .url = "git+https://github.com/Not-Nik/raylib-zig?ref=devel#1ef4995f82686fda7c2eff1c76f26d1200d74760",
             .hash = "12206cf18aea41dc1e61b697c36ef627752e84fe9a9362b800240fce7dea3665094d",
         },
-        .zqlite = .{
-            .url = "git+https://github.com/probably-neb/zqlite?ref=master#89a251102cada1dc20a8425603d01e116cda3c17",
-            .hash = "12207efcce8a24ca2742962ecdbb09e1c0a9da6691fb3f82104381d966b0ed0aea68",
+        .clay = .{
+            .path = "./lib/clay",
         },
     },
     .paths = .{

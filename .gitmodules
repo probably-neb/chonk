@@ -1,0 +1,3 @@
+[submodule "lib/clay"]
+	path = lib/clay
+	url = git@github.com:johan0A/clay-zig-bindings.git

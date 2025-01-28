@@ -1,5 +1,7 @@
 const std = @import("std");
 
+// const clay_build_zig = @import("./lib/clay/build.zig");
+
 // Although this function looks imperative, note that its job is to
 // declaratively construct a build graph that will be executed by an external
 // runner.
@@ -50,6 +52,13 @@ pub fn build(b: *std.Build) void {
         exe.linkLibrary(raylib_artifact);
         exe.root_module.addImport("raylib", raylib);
         exe.root_module.addImport("raygui", raygui);
+    }
+    {
+        const zclay_dep = b.dependency("clay", .{
+            .target = target,
+            .optimize = optimize,
+        });
+        exe.root_module.addImport("zclay", zclay_dep.module("zclay"));
     }
 
     // This declares intent for the executable to be installed into the
