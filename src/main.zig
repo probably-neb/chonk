@@ -54,11 +54,20 @@ pub fn main() anyerror!void {
                 files_indexed_prev: u64 = 0,
             } = .{},
         },
+
+        const Page = @This();
+
+        pub fn create_viewer(path: [:0]const u8) Page {
+            return .{ .viewer = .{ .path = path } };
+        }
+        pub fn create_select() Page {
+            return .{ .select = .{} };
+        }
     };
 
-    var page_current: Page = .{
-        .select = .{},
-    };
+    var page_current: Page = Page.create_select();
+
+    var page_next: ?Page = null;
 
     const font_default = try rl.getFontDefault();
 
@@ -66,6 +75,44 @@ pub fn main() anyerror!void {
     while (!rl.windowShouldClose()) { // Detect window close button or ESC key
         // TODO: max water mark
         defer _ = frame_arena.reset(.retain_capacity);
+        if (page_next) |pn| page_swap: {
+            defer page_next = null;
+            const page_prev = page_current;
+            page_current = pn;
+            switch (pn) {
+                .select => {},
+                .viewer => {
+                    const path = pn.viewer.path;
+                    page_current.viewer.fs_store.init(path) catch |err| {
+                        std.debug.print("ERROR: failed to init FS_Store: {any}\n", .{err});
+                        page_current = page_prev;
+                        break :page_swap;
+                    };
+                    const thread = Thread.spawn(.{}, lib.index_paths_starting_with, .{
+                        page_current.viewer.path,
+                        alloc_state,
+                        &page_current.viewer.fs_store,
+                        &page_current.viewer.dbg.files_indexed,
+                    }) catch |err| {
+                        std.debug.print("ERROR: failed to spawn worker thread: {any}\n", .{err});
+                        // viewer_data.worker_thread_pool_running.reset();
+                        // viewer_data.worker_thread_pool.deinit();
+                        // try viewer_data.worker_thread_pool_queue.enqueue(dir);
+                        page_current = page_prev;
+                        break :page_swap;
+                    };
+                    thread.detach();
+                },
+            }
+            switch (page_prev) {
+                .select => {},
+                .viewer => |viewer_data| {
+                    alloc_state.free(viewer_data.path);
+                    // TODO: deinit fs_store? and kill thread
+                },
+            }
+        }
+
         rl.beginDrawing();
         defer rl.endDrawing();
 
@@ -100,73 +147,90 @@ pub fn main() anyerror!void {
                     std.debug.print("ERROR: Failed to retrieve file paths: {any}\n", .{err});
                     break :frame;
                 };
-                const window_width = rl.getRenderWidth();
-
-                const label_height: i32 = label: {
-                    const label: [*:0]const u8 = "Select Path or Drive to View";
-                    const label_font_size = 48;
-                    const label_size = rl.measureTextEx(font_default, label, label_font_size, 0.1);
-                    const label_top_pad = 10;
-
-                    rl.drawText(
-                        label,
-                        @divTrunc(window_width, 2) - @divTrunc(@as(i32, @intFromFloat(label_size.x)), 2),
-                        label_top_pad,
-                        label_font_size,
-                        rl.Color.black,
-                    );
-                    break :label @as(i32, @intFromFloat(label_size.y)) + label_top_pad + 20;
-                };
-
-                const file_paths = select_data.paths.?;
-
-                const window_width_f32: f32 = @floatFromInt(window_width);
-                const path_width = window_width_f32 * 0.5;
-
-                const path_x = (window_width_f32 / 2) - (path_width / 2);
-                const path_height = 60;
-                const path_font_size = 32;
-
-                rgui.guiSetStyle(.default, rgui.GuiDefaultProperty.text_size, path_font_size);
-
-                for (file_paths, 0..) |file, i| {
-                    const file_path = file.path;
-                    const path_y = @as(f32, @floatFromInt(label_height + @as(i32, @intCast((i * path_height))))); // 30 pixels spacing between lines
-                    if (rgui.guiButton(.{
-                        .x = path_x,
-                        .y = path_y,
-                        .width = path_width,
-                        .height = path_height,
-                    }, file_path) != 0) {
-                        const page_prev = page_current;
-                        const path = try alloc_state.dupeZ(u8, file_path);
-                        page_current = .{
-                            .viewer = .{
-                                .path = path,
+                clay.UI(&.{
+                    clay.Config.ID("Page_Select"),
+                    clay.Config.layout(.{
+                        .direction = .TOP_TO_BOTTOM,
+                        .sizing = .{ .h = clay.SizingAxis.grow, .w = clay.SizingAxis.grow },
+                        .child_alignment = .{ .x = .CENTER, .y = .TOP },
+                        .child_gap = 32,
+                    }),
+                })({
+                    clay.UI(&.{
+                        clay.Config.ID("Select_Title"), clay.Config.layout(.{
+                            .padding = clay.Padding.all(16),
+                            .sizing = .{ .w = clay.SizingAxis.fit, .h = clay.SizingAxis.fit },
+                        }),
+                    })({
+                        clay.text("Select Path or Drive to View", clay.Config.text(.{
+                            .font_size = 48,
+                            .letter_spacing = 4,
+                        }));
+                    });
+                    clay.UI(&.{
+                        clay.Config.ID("Select_Paths"),
+                        clay.Config.layout(.{
+                            .direction = .TOP_TO_BOTTOM,
+                            .child_alignment = .{ .x = .LEFT, .y = .TOP },
+                            .sizing = .{
+                                .w = clay.SizingAxis.percent(0.6),
+                                .h = clay.SizingAxis.fit,
                             },
-                        };
-                        page_current.viewer.fs_store.init(path) catch |err| {
-                            std.debug.print("ERROR: failed to init FS_Store: {any}\n", .{err});
-                            page_current = page_prev;
-                            break :frame;
-                        };
-                        const thread = Thread.spawn(.{}, lib.index_paths_starting_with, .{
-                            page_current.viewer.path,
-                            alloc_state,
-                            &page_current.viewer.fs_store,
-                            &page_current.viewer.dbg.files_indexed,
-                        }) catch |err| {
-                            std.debug.print("ERROR: failed to spawn worker thread: {any}\n", .{err});
-                            // viewer_data.worker_thread_pool_running.reset();
-                            // viewer_data.worker_thread_pool.deinit();
-                            // try viewer_data.worker_thread_pool_queue.enqueue(dir);
-                            page_current = page_prev;
-                            break :frame;
-                        };
-                        thread.detach();
-                        break :frame;
-                    }
-                }
+                            .padding = clay.Padding.all(8),
+                            .child_gap = 16,
+                        }),
+                    })({
+                        for (select_data.paths.?, 0..) |path, index| {
+                            clay.UI(&.{
+                                clay.Config.IDI("TopLevelPath", @intCast(index)),
+                                clay.Config.layout(.{
+                                    .direction = .LEFT_TO_RIGHT,
+                                    .padding = clay.Padding.all(16),
+                                    .sizing = .{
+                                        .w = clay.SizingAxis.grow,
+                                        .h = clay.SizingAxis.grow,
+                                    },
+                                }),
+                                clay.Config.border(clay_border_all(
+                                    rl_color_to_arr(rl.Color.light_gray.brightness(0.25)),
+                                    3,
+                                    3.0,
+                                )),
+                                if (clay.cdefs.Clay_PointerOver(clay.IDI("TopLevelPath", @intCast(index)))) clay.Config.rectangle(.{
+                                    .color = rl_color_to_arr(rl.Color.gray.brightness(0.8)),
+                                }) else ClayCustom.none(),
+                            })({
+                                if (clay.cdefs.Clay_PointerOver(clay.IDI("TopLevelPath", @intCast(index))) and rl.isMouseButtonPressed(.left)) {
+                                    std.debug.print("Clicked: {s}\n", .{path.path});
+                                    page_next = Page.create_viewer(alloc_state.dupeZ(u8, path.path) catch unreachable);
+                                }
+                                clay.UI(&.{
+                                    clay.Config.layout(.{
+                                        .direction = .TOP_TO_BOTTOM,
+                                        .child_gap = 8,
+                                        .child_alignment = .{
+                                            .x = .LEFT,
+                                            .y = .CENTER,
+                                        },
+                                    }),
+                                })({
+                                    clay.text(path.path, clay.Config.text(.{
+                                        .color = rl_color_to_arr(rl.Color.black),
+                                        .letter_spacing = 2,
+                                        .font_size = 32,
+                                    }));
+                                    if (path.device) |device| {
+                                        clay.text(device, clay.Config.text(.{
+                                            .color = rl_color_to_arr(rl.Color.black.brightness(0.5)),
+                                            .letter_spacing = 2,
+                                            .font_size = 24,
+                                        }));
+                                    }
+                                });
+                            });
+                        }
+                    });
+                });
             },
             .viewer => |*viewer_data| frame: {
                 const show_dbg_info = true;
@@ -480,7 +544,13 @@ pub fn main() anyerror!void {
                     rl.endScissorMode();
                 },
                 .image => unreachable,
-                .custom => unreachable,
+                .custom => {
+                    const config = render_command.config.custom_config;
+                    const data: *ClayCustom = @ptrCast(config.custom_data);
+                    switch (data.*) {
+                        .none => {},
+                    }
+                },
             }
         }
     }
@@ -728,6 +798,8 @@ pub fn generate_palette(
     weights: []const f32,
     scheme: ColorScheme,
 ) ![]rl.Color {
+    if (weights.len == 0) return &[_]rl.Color{};
+
     const colormap = switch (scheme) {
         .rainbow => rainbowColor,
         .sample => |sample_scheme| switch (sample_scheme) {
@@ -819,8 +891,8 @@ fn clay_measure_text(text: []const u8, ctx: *clay.TextElementConfig) clay.Dimens
     return textSize;
 }
 
-fn rl_color_to_arr(color: rl.Color) [4]u8 {
-    return .{ color.r, color.g, color.b, color.a };
+fn rl_color_to_arr(color: rl.Color) [4]f32 {
+    return .{ @floatFromInt(color.r), @floatFromInt(color.g), @floatFromInt(color.b), @floatFromInt(color.a) };
 }
 
 fn rl_color_from_arr(arr: [4]f32) rl.Color {
@@ -831,3 +903,30 @@ fn rl_color_from_arr(arr: [4]f32) rl.Color {
         .a = @intFromFloat(arr[3]),
     };
 }
+
+fn clay_border_all(color: clay.Color, width: u16, radius: f32) clay.BorderElementConfig {
+    const data = clay.BorderData{ .color = color, .width = width };
+    return clay.BorderElementConfig{
+        .left = data,
+        .right = data,
+        .top = data,
+        .bottom = data,
+        .between_children = .{},
+        .corner_radius = .{
+            .top_left = radius,
+            .bottom_left = radius,
+            .top_right = radius,
+            .bottom_right = radius,
+        },
+    };
+}
+
+const ClayCustom = union(enum) {
+    none: void,
+
+    const NONE: ClayCustom = .{ .none = {} };
+
+    pub fn none() clay.Config {
+        return clay.Config.custom(.{ .custom_data = @ptrCast(@constCast(&NONE)) });
+    }
+};
