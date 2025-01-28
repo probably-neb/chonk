@@ -34,28 +34,15 @@ pub fn main() anyerror!void {
     var frame_arena = std.heap.ArenaAllocator.init(alloc_state);
     const frame_arena_alloc = frame_arena.allocator();
 
-    var connection_pool = try lib.DB.init_pool(alloc_state, 4);
-    const conn = connection_pool.acquire();
-    try lib.DB.ensure_init(conn);
-    connection_pool.release(conn);
-    if (c.sqlite3_config(c.SQLITE_CONFIG_LOG, error_log_callback, c.SQLITE_NULL) != c.SQLITE_OK) {
-        std.debug.print("WARN: Failed to setup db logging\n", .{});
-    }
-
     const Page = union(enum) {
         select: struct {
             paths: ?[]lib.TopLevelPath = null,
         },
         viewer: struct {
             path: [:0]const u8,
-            worker_thread_pool: Thread.Pool = undefined,
-            worker_thread_pool_running: Thread.ResetEvent = .{},
-            worker_thread_pool_queue: lib.DirQueue = undefined,
             fs_store: lib.FS_Store = undefined,
-            trickle_queue: lib.AtomicQueue(lib.FileSizeEntry) = undefined,
             scroll_state: rl.Vector2 = undefined,
             scroll_view: rl.Rectangle = undefined,
-            query_thread: ?Thread = null,
             dir_entries: DirEntriesThreadState = .{},
             dbg: struct {
                 files_indexed: u64 = 0,
@@ -83,6 +70,7 @@ pub fn main() anyerror!void {
         switch (page_current) {
             .select => |*select_data| frame: {
                 if (select_data.paths == null) {
+                    // FIXME: alloc all with frame_arena, only dupe to alloc_state if clicked
                     select_data.paths = lib.get_top_level_paths(alloc_state, frame_arena_alloc) catch |err| {
                         std.debug.print("ERROR: Failed to retrieve file paths: {any}\n", .{err});
                         break :frame;
@@ -126,11 +114,26 @@ pub fn main() anyerror!void {
                         .width = path_width,
                         .height = path_height,
                     }, file_path) != 0) {
+                        const page_prev = page_current;
                         page_current = .{
                             .viewer = .{
                                 .path = file_path,
                             },
                         };
+                        page_current.viewer.fs_store.init() catch |err| {
+                            std.debug.print("ERROR: failed to init FS_Store: {any}\n", .{err});
+                            page_current = page_prev;
+                            break :frame;
+                        };
+                        const thread = Thread.spawn(.{}, lib.index_paths_starting_with, .{ page_current.viewer.path, alloc_state, &page_current.viewer.fs_store, &page_current.viewer.dbg.files_indexed }) catch |err| {
+                            std.debug.print("ERROR: failed to spawn worker thread: {any}\n", .{err});
+                            // viewer_data.worker_thread_pool_running.reset();
+                            // viewer_data.worker_thread_pool.deinit();
+                            // try viewer_data.worker_thread_pool_queue.enqueue(dir);
+                            page_current = page_prev;
+                            break :frame;
+                        };
+                        thread.detach();
                         break :frame;
                     }
                 }
@@ -157,95 +160,7 @@ pub fn main() anyerror!void {
                     };
                     rl.drawText(dbg_text, 0, rl.getRenderHeight() - debug_text_size - 5, debug_text_size, rl.Color.black);
                 };
-                if (viewer_data.dir_entries.thread == null) dir_entries: {
-                    viewer_data.dir_entries.alive_mutex.lock();
-                    const thread = Thread.spawn(.{}, dir_entries_thread_impl, .{
-                        &viewer_data.dir_entries, viewer_data.path, connection_pool,
-                    }) catch |err| {
-                        std.debug.print("ERROR: failed to spawn query thread: {any}\n", .{err});
-                        viewer_data.dir_entries.alive_mutex.unlock();
-                        break :dir_entries;
-                    };
-                    thread.detach();
-                    viewer_data.dir_entries.thread = thread;
-                }
-                if (!viewer_data.worker_thread_pool_running.isSet()) worker: {
-                    viewer_data.worker_thread_pool_running.set();
-                    Thread.Pool.init(&viewer_data.worker_thread_pool, .{
-                        .allocator = alloc_state,
-                        .n_jobs = WORKER_THREAD_COUNT_MAX,
-                    }) catch |err| {
-                        std.debug.print("ERROR: failed to create worker thread pool: {any}\n", .{err});
-                        viewer_data.worker_thread_pool_running.reset();
-                        viewer_data.worker_thread_pool.deinit();
-                        break :worker;
-                    };
-                    try viewer_data.worker_thread_pool_queue.init(alloc_state, 1024);
-                    {
-                        const tl_conn = connection_pool.acquire();
-                        defer connection_pool.release(conn);
-                        var dir = try std.fs.openDirAbsolute(viewer_data.path, .{ .iterate = true });
-                        defer dir.close();
-                        var dir_iter = dir.iterate();
-                        while (dir_iter.next() catch null) |entry| {
-                            const abs_path = std.fs.path.join(frame_arena_alloc, &.{ viewer_data.path, entry.name }) catch continue;
-                            switch (entry.kind) {
-                                .file => {
-                                    try lib.DB.entries_save_one(tl_conn, .{
-                                        .kind = .file,
-                                        .size_bytes = stat: {
-                                            const file = std.fs.openFileAbsolute(abs_path, .{ .mode = .read_only }) catch break :stat 0;
-                                            const stat = file.stat() catch break :stat 0;
-                                            break :stat stat.size;
-                                        },
-                                        .abs_path = abs_path,
-                                    });
-                                },
-                                .directory => {
-                                    try lib.DB.entries_save_one(tl_conn, .{
-                                        .kind = .dir,
-                                        .size_bytes = 0,
-                                        .abs_path = abs_path,
-                                    });
-                                },
-                                .sym_link => {
-                                    try lib.DB.entries_save_one(tl_conn, .{
-                                        .kind = .link_soft,
-                                        .size_bytes = 0,
-                                        .abs_path = abs_path,
-                                    });
-                                },
-                                else => continue,
-                            }
-                            try viewer_data.worker_thread_pool_queue.enqueue(abs_path);
-                        }
-                    }
-                    try viewer_data.fs_store.init();
 
-                    viewer_data.worker_thread_pool.spawn(lib.index_paths_starting_with, .{ viewer_data.path, alloc_state, &viewer_data.fs_store, &viewer_data.worker_thread_pool_running, &viewer_data.dbg.files_indexed }) catch |err| {
-                        std.debug.print("ERROR: failed to spawn worker thread: {any}\n", .{err});
-                        // viewer_data.worker_thread_pool_running.reset();
-                        // viewer_data.worker_thread_pool.deinit();
-                        // try viewer_data.worker_thread_pool_queue.enqueue(dir);
-                    };
-                }
-
-                if (false) {
-                    const new_dirs = try viewer_data.worker_thread_pool_queue.empty(alloc_state);
-                    defer alloc_state.free(new_dirs);
-                    if (new_dirs.len > 0) {
-                        std.debug.print("Found new dirs:\n", .{});
-                    }
-                    for (new_dirs) |dir| {
-                        std.debug.print("\t'{s}'\n", .{dir});
-                        viewer_data.worker_thread_pool.spawn(lib.index_paths_starting_with, .{ dir, alloc_state, &viewer_data.fs_store, &viewer_data.worker_thread_pool_running, &viewer_data.dbg.files_indexed }) catch |err| {
-                            std.debug.print("ERROR: failed to spawn worker thread: {any}\n", .{err});
-                            viewer_data.worker_thread_pool_running.reset();
-                            viewer_data.worker_thread_pool.deinit();
-                            try viewer_data.worker_thread_pool_queue.enqueue(dir);
-                        };
-                    }
-                }
                 const window_width = rl.getRenderWidth();
 
                 {
@@ -262,9 +177,6 @@ pub fn main() anyerror!void {
                             .paths = null,
                         } };
                         // tell worker thread to go die
-                        viewer_data.worker_thread_pool_running.reset();
-                        viewer_data.worker_thread_pool.deinit();
-                        viewer_data.dir_entries.alive_mutex.unlock();
                         break :frame;
                     }
                 }
@@ -285,9 +197,7 @@ pub fn main() anyerror!void {
                     break :label @as(i32, @intFromFloat(label_size.y)) + label_top_pad + 20;
                 };
 
-                viewer_data.dir_entries.data_mutex.lock();
-                defer viewer_data.dir_entries.data_mutex.unlock();
-                const dir_entries = viewer_data.dir_entries.data;
+                const dir_entries: []lib.DB.Entry = &.{};
 
                 // std.debug.print("FOUND {d} entries\n", .{dir_entries.len});
 

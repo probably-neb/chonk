@@ -405,12 +405,10 @@ const fts = @cImport({
     @cInclude("fts.h");
 });
 
-pub fn index_paths_starting_with(root_path: []const u8, base_alloc: Allocator, store: *FS_Store, running: *const std.Thread.ResetEvent, files_indexed: *u64) void {
-    _ = running;
-
+pub fn index_paths_starting_with(root_path: []const u8, base_alloc: Allocator, store: *FS_Store, files_indexed: *u64) void {
     std.debug.print("INDEX START : {s}\n", .{root_path});
     const fs = std.fs;
-    defer base_alloc.free(root_path);
+    // defer base_alloc.free(root_path);
 
     var arena = std.heap.ArenaAllocator.init(base_alloc);
     const alloc = arena.allocator();
