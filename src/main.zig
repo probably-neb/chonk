@@ -69,8 +69,6 @@ pub fn main() anyerror!void {
 
     var page_next: ?Page = null;
 
-    const font_default = try rl.getFontDefault();
-
     // Main game loop
     while (!rl.windowShouldClose()) { // Detect window close button or ESC key
         // TODO: max water mark
@@ -116,10 +114,12 @@ pub fn main() anyerror!void {
         rl.beginDrawing();
         defer rl.endDrawing();
 
-        clay.setLayoutDimensions(.{
+        const win_dims: clay.Dimensions = .{
             .w = @floatFromInt(rl.getRenderWidth()),
             .h = @floatFromInt(rl.getRenderHeight()),
-        });
+        };
+
+        clay.setLayoutDimensions(win_dims);
         const pointer_pos = rl.getMousePosition();
         clay.setPointerState(
             .{
@@ -140,12 +140,12 @@ pub fn main() anyerror!void {
         clay.beginLayout();
 
         switch (page_current) {
-            .select => |*select_data| frame: {
+            .select => |*select_data| {
                 // FIXME: cache
                 // FIXME: ensure no unessecary dupeZ in lib.get_top_level_paths
-                select_data.paths = lib.get_top_level_paths(frame_arena_alloc, frame_arena_alloc) catch |err| {
+                select_data.paths = lib.get_top_level_paths(frame_arena_alloc, frame_arena_alloc) catch |err| err: {
                     std.debug.print("ERROR: Failed to retrieve file paths: {any}\n", .{err});
-                    break :frame;
+                    break :err &.{};
                 };
                 clay.UI(&.{
                     clay.Config.ID("Page_Select"),
@@ -232,42 +232,7 @@ pub fn main() anyerror!void {
                     });
                 });
             },
-            .viewer => |*viewer_data| frame: {
-                const window_width = rl.getRenderWidth();
-
-                {
-                    const back_button_font_size = 32;
-                    rgui.guiSetStyle(.default, rgui.GuiDefaultProperty.text_size, back_button_font_size);
-
-                    if (rgui.guiButton(.{
-                        .x = 5,
-                        .y = 5,
-                        .width = 40,
-                        .height = 40,
-                    }, "<") != 0) {
-                        page_current = .{ .select = .{
-                            .paths = null,
-                        } };
-                        break :frame;
-                    }
-                }
-
-                const label_height: i32 = label: {
-                    const label: [*:0]const u8 = viewer_data.path;
-                    const label_font_size = 48;
-                    const label_size = rl.measureTextEx(font_default, label, label_font_size, 0.1);
-                    const label_top_pad = 10;
-
-                    rl.drawText(
-                        label,
-                        @divTrunc(window_width, 2) - @divTrunc(@as(i32, @intFromFloat(label_size.x)), 2),
-                        label_top_pad,
-                        label_font_size,
-                        rl.Color.black,
-                    );
-                    break :label @as(i32, @intFromFloat(label_size.y)) + label_top_pad + 20;
-                };
-
+            .viewer => |*viewer_data| {
                 const dir_entries: []DirEntry = blk: {
                     const store = viewer_data.fs_store;
                     const root = store.root_entry_ptr;
@@ -290,78 +255,245 @@ pub fn main() anyerror!void {
                     std.sort.insertion(DirEntry, dir_entries, {}, DirEntry.gt_than);
                     break :blk dir_entries;
                 };
-                const window_width_f32: f32 = @floatFromInt(window_width);
-                const window_height_f32: f32 = @floatFromInt(rl.getRenderHeight());
 
-                const content_rect: rl.Rectangle = pad(.{
-                    .x = 0,
-                    .y = @floatFromInt(label_height),
-                    .width = window_width_f32,
-                    .height = window_height_f32 - @as(f32, @floatFromInt(label_height)),
-                }, .{ .x = 50, .y = 25 });
-                const scroll_rect, const tree_view_rect = divide_in_2_with_padding(
-                    content_rect,
-                    25,
-                );
-                // std.debug.print("FOUND {d} entries\n", .{dir_entries.len});
+                clay.UI(&.{
+                    clay.Config.ID("Page_Select"),
+                    clay.Config.layout(.{
+                        .direction = .TOP_TO_BOTTOM,
+                        .sizing = .{ .h = clay.SizingAxis.grow, .w = clay.SizingAxis.grow },
+                        .child_alignment = .{ .x = .CENTER, .y = .TOP },
+                        .child_gap = 32,
+                        .padding = clay.Padding.all(16),
+                    }),
+                })({
+                    {
+                        const parent_page_elem_id = clay.getElementId("Page_Select");
+                        const back_button_id = clay.Config.ID("Viewer_Back_Btn");
+                        clay.UI(&.{
+                            back_button_id,
+                            clay.Config.floating(.{
+                                .offset = .{
+                                    .x = 16,
+                                    .y = 16,
+                                },
+                                .zIndex = 1,
+                                .expand = .{ .h = 0, .w = 0 },
+                                .pointerCaptureMode = .CAPTURE,
+                                .parentId = parent_page_elem_id.id,
+                                .attachment = .{
+                                    .element = .LEFT_TOP,
+                                    .parent = .LEFT_TOP,
+                                },
+                            }),
+                            clay.Config.layout(.{
+                                .sizing = .{ .w = clay.SizingAxis.fixed(36), .h = clay.SizingAxis.fixed(36) },
+                                .padding = clay.Padding.all(4),
+                                .child_alignment = .{
+                                    .x = .CENTER,
+                                    .y = .CENTER,
+                                },
+                            }),
+                            clay.Config.rectangle(.{
+                                .color = rl_color_to_arr(rl.Color.gray.brightness(if (clay.pointerOver(back_button_id.id)) 0.9 else 0.8)),
+                                .corner_radius = clay.CornerRadius.all(1.0),
+                            }),
+                        })({
+                            if (clay.pointerOver(back_button_id.id) and rl.isMouseButtonPressed(.left)) {
+                                page_next = Page.create_select();
+                            }
+                            clay.text("<", clay.Config.text(.{
+                                .font_size = 32,
+                            }));
+                        });
+                    }
+                    // TODO: breadcrumbs...
+                    clay.text(viewer_data.path, clay.Config.text(.{
+                        .letter_spacing = 4,
+                        .font_size = 48,
+                    }));
+                    clay.UI(&.{
+                        clay.Config.layout(.{
+                            .direction = if (win_dims.w > win_dims.h) .LEFT_TO_RIGHT else .TOP_TO_BOTTOM,
+                            .child_gap = 48,
+                            .child_alignment = .{
+                                .x = .CENTER,
+                                .y = .CENTER,
+                            },
+                            .sizing = .{ .w = clay.SizingAxis.grow, .h = clay.SizingAxis.grow },
+                            .padding = clay.Padding.all(32),
+                        }),
+                    })({
+                        const child_sizing: clay.Sizing = if (win_dims.w < win_dims.h) .{ .w = clay.SizingAxis.grow, .h = clay.SizingAxis.percent(0.5) } else .{ .w = clay.SizingAxis.percent(0.5), .h = clay.SizingAxis.grow };
+                        clay.UI(&.{
+                            clay.Config.layout(.{
+                                .sizing = child_sizing,
+                                .direction = .TOP_TO_BOTTOM,
+                                .padding = .{
+                                    .x = 8,
+                                    .y = 16,
+                                },
+                            }),
+                            clay.Config.border(border: {
+                                const color = rl_color_to_arr(rl.Color.gray.brightness(0.8));
+                                var config = clay_border_all(color, 4, 8);
+                                config.between_children = .{
+                                    .width = 3,
+                                    .color = color,
+                                };
+                                break :border config;
+                            }),
+                            clay.Config.scroll(.{
+                                .vertical = true,
+                            }),
+                        })({
+                            for (dir_entries, 0..) |entry, index| {
+                                clay.UI(&.{
+                                    clay.Config.IDI("DirEntry", @intCast(index)),
+                                    clay.Config.layout(.{
+                                        .padding = clay.Padding.all(8),
+                                        .direction = .LEFT_TO_RIGHT,
+                                        .child_alignment = .{ .y = .CENTER },
+                                        .sizing = .{ .w = clay.SizingAxis.grow },
+                                    }),
+                                })({
+                                    clay.text(entry.name, clay.Config.text(.{
+                                        .font_size = 24,
+                                        .letter_spacing = 4,
+                                    }));
 
-                const path_font_size = 32;
-                const path_height = 60;
+                                    clay.UI(&.{
+                                        clay.Config.layout(.{
+                                            .sizing = .{ .w = clay.SizingAxis.grow },
+                                        }),
+                                    })({});
 
-                const scroll_content = rl.Rectangle{
-                    .x = 0,
-                    .y = 0,
-                    .width = scroll_rect.width,
-                    .height = @floatFromInt(dir_entries.len * path_height),
-                };
+                                    const size_str = fmt_file_size(frame_arena_alloc, entry.size_bytes);
+                                    clay.text(size_str, clay.Config.text(.{ .letter_spacing = 4, .wrap_mode = .none }));
+                                });
+                            }
+                        });
+                        const dir_entries_data: ClayCustom = .{ .squarified_treemap = .{
+                            .dir_entries = dir_entries,
+                        } };
+                        clay.UI(&.{
+                            clay.Config.layout(.{
+                                .sizing = child_sizing,
+                            }),
+                            clay.Config.rectangle(.{
+                                .color = rl_color_to_arr(rl.Color.gray.brightness(0.5)),
+                            }),
+                            clay.Config.custom(.{
+                                .custom_data = @ptrCast(@constCast(&dir_entries_data)),
+                            }),
+                        })({});
+                    });
+                });
 
-                _ = rgui.guiScrollPanel(scroll_rect, null, scroll_content, &viewer_data.scroll_state, &viewer_data.scroll_view);
-
-                const showScrollBounds = false;
-                if (showScrollBounds) {
-                    rl.drawRectangleRec(.{
-                        .x = scroll_rect.x + viewer_data.scroll_state.x,
-                        .y = scroll_rect.y + viewer_data.scroll_state.y,
-                        .width = scroll_content.width,
-                        .height = scroll_content.height,
-                    }, rl.Color.fade(rl.Color.gold, 0.1));
-                }
-
-                // const path_width = window_width_f32 * 0.5;
-
-                rl.beginScissorMode(
-                    @intFromFloat(viewer_data.scroll_view.x),
-                    @intFromFloat(viewer_data.scroll_view.y),
-                    @intFromFloat(viewer_data.scroll_view.width),
-                    @intFromFloat(viewer_data.scroll_view.height),
-                );
-                const path_x = scroll_rect.x + 25;
-
-                rgui.guiSetStyle(.default, rgui.GuiDefaultProperty.text_size, path_font_size);
-
-                for (dir_entries, 0..) |file, i| {
-                    const path_y = scroll_rect.y + @as(f32, @floatFromInt((i * path_height))) + viewer_data.scroll_state.y; // 30 pixels spacing between lines
-                    rl.drawText(
-                        file.name,
-                        @intFromFloat(path_x),
-                        @intFromFloat(path_y),
-                        path_font_size,
-                        rl.Color.black,
-                    );
-                    const size_text = fmt_file_size(frame_arena_alloc, file.size_bytes);
-                    // std.debug.print("{s} size text {s}\n", .{ file.abs_path, size_text });
-                    const size_text_size = rl.measureTextEx(font_default, size_text, path_font_size, 0);
-                    rl.drawText(
-                        size_text,
-                        @intFromFloat(scroll_rect.x + scroll_rect.width - size_text_size.x - 75),
-                        @intFromFloat(path_y),
-                        path_font_size,
-                        rl.Color.black,
-                    );
-                }
-                rl.endScissorMode();
-
-                squarify(frame_arena_alloc, dir_entries, tree_view_rect);
+                // {
+                //     const back_button_font_size = 32;
+                //     rgui.guiSetStyle(.default, rgui.GuiDefaultProperty.text_size, back_button_font_size);
+                //
+                //     if (rgui.guiButton(.{
+                //         .x = 5,
+                //         .y = 5,
+                //         .width = 40,
+                //         .height = 40,
+                //     }, "<") != 0) {
+                //         page_current = .{ .select = .{
+                //             .paths = null,
+                //         } };
+                //         break :frame;
+                //     }
+                // }
+                //
+                // const label_height: i32 = label: {
+                //     const label: [*:0]const u8 = viewer_data.path;
+                //     const label_font_size = 48;
+                //     const label_size = rl.measureTextEx(font_default, label, label_font_size, 0.1);
+                //     const label_top_pad = 10;
+                //
+                //     rl.drawText(
+                //         label,
+                //         @divTrunc(window_width, 2) - @divTrunc(@as(i32, @intFromFloat(label_size.x)), 2),
+                //         label_top_pad,
+                //         label_font_size,
+                //         rl.Color.black,
+                //     );
+                //     break :label @as(i32, @intFromFloat(label_size.y)) + label_top_pad + 20;
+                // };
+                //
+                // const window_width_f32: f32 = @floatFromInt(window_width);
+                // const window_height_f32: f32 = @floatFromInt(rl.getRenderHeight());
+                //
+                // const content_rect: rl.Rectangle = pad(.{
+                //     .x = 0,
+                //     .y = @floatFromInt(label_height),
+                //     .width = window_width_f32,
+                //     .height = window_height_f32 - @as(f32, @floatFromInt(label_height)),
+                // }, .{ .x = 50, .y = 25 });
+                // const scroll_rect, const tree_view_rect = divide_in_2_with_padding(
+                //     content_rect,
+                //     25,
+                // );
+                // // std.debug.print("FOUND {d} entries\n", .{dir_entries.len});
+                //
+                // const path_font_size = 32;
+                // const path_height = 60;
+                //
+                // const scroll_content = rl.Rectangle{
+                //     .x = 0,
+                //     .y = 0,
+                //     .width = scroll_rect.width,
+                //     .height = @floatFromInt(dir_entries.len * path_height),
+                // };
+                //
+                // _ = rgui.guiScrollPanel(scroll_rect, null, scroll_content, &viewer_data.scroll_state, &viewer_data.scroll_view);
+                //
+                // const showScrollBounds = false;
+                // if (showScrollBounds) {
+                //     rl.drawRectangleRec(.{
+                //         .x = scroll_rect.x + viewer_data.scroll_state.x,
+                //         .y = scroll_rect.y + viewer_data.scroll_state.y,
+                //         .width = scroll_content.width,
+                //         .height = scroll_content.height,
+                //     }, rl.Color.fade(rl.Color.gold, 0.1));
+                // }
+                //
+                // // const path_width = window_width_f32 * 0.5;
+                //
+                // rl.beginScissorMode(
+                //     @intFromFloat(viewer_data.scroll_view.x),
+                //     @intFromFloat(viewer_data.scroll_view.y),
+                //     @intFromFloat(viewer_data.scroll_view.width),
+                //     @intFromFloat(viewer_data.scroll_view.height),
+                // );
+                // const path_x = scroll_rect.x + 25;
+                //
+                // rgui.guiSetStyle(.default, rgui.GuiDefaultProperty.text_size, path_font_size);
+                //
+                // for (dir_entries, 0..) |file, i| {
+                //     const path_y = scroll_rect.y + @as(f32, @floatFromInt((i * path_height))) + viewer_data.scroll_state.y; // 30 pixels spacing between lines
+                //     rl.drawText(
+                //         file.name,
+                //         @intFromFloat(path_x),
+                //         @intFromFloat(path_y),
+                //         path_font_size,
+                //         rl.Color.black,
+                //     );
+                //     const size_text = fmt_file_size(frame_arena_alloc, file.size_bytes);
+                //     // std.debug.print("{s} size text {s}\n", .{ file.abs_path, size_text });
+                //     const size_text_size = rl.measureTextEx(font_default, size_text, path_font_size, 0);
+                //     rl.drawText(
+                //         size_text,
+                //         @intFromFloat(scroll_rect.x + scroll_rect.width - size_text_size.x - 75),
+                //         @intFromFloat(path_y),
+                //         path_font_size,
+                //         rl.Color.black,
+                //     );
+                // }
+                // rl.endScissorMode();
+                //
+                // squarify(frame_arena_alloc, dir_entries, tree_view_rect);
             },
         }
 
@@ -523,9 +655,19 @@ pub fn main() anyerror!void {
                 .image => unreachable,
                 .custom => {
                     const config = render_command.config.custom_config;
-                    const data: *ClayCustom = @ptrCast(config.custom_data);
+                    const data: *ClayCustom = @ptrCast(@alignCast(config.custom_data));
                     switch (data.*) {
                         .none => {},
+                        .squarified_treemap => |treemap_data| {
+                            const dir_entries = treemap_data.dir_entries;
+                            const rect: rl.Rectangle = .{
+                                .x = bounding_box.x,
+                                .y = bounding_box.y,
+                                .width = bounding_box.width,
+                                .height = bounding_box.height,
+                            };
+                            squarify(frame_arena_alloc, dir_entries, rect);
+                        },
                     }
                 },
             }
@@ -575,7 +717,7 @@ const DirEntry = struct {
 
 // https://cgl.ethz.ch/teaching/scivis_common/Literature/squarifiedTreeMaps.pdf
 // https://github.com/nicopolyptic/treemap/blob/master/src/main/ts/squarifier.ts
-fn squarify(alloc: Allocator, dir_entries: []DirEntry, rect: rl.Rectangle) void {
+fn squarify(alloc: Allocator, dir_entries: []const DirEntry, rect: rl.Rectangle) void {
     // TODO: scaleWeights?
     // this.scaleWeights(nodes, width, height);
     std.debug.assert(std.sort.isSorted(DirEntry, dir_entries, {}, DirEntry.gt_than));
@@ -929,6 +1071,9 @@ fn clay_border_all(color: clay.Color, width: u16, radius: f32) clay.BorderElemen
 
 const ClayCustom = union(enum) {
     none: void,
+    squarified_treemap: struct {
+        dir_entries: []const DirEntry,
+    },
 
     const NONE: ClayCustom = .{ .none = {} };
 
