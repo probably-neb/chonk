@@ -47,6 +47,7 @@ pub fn main() anyerror!void {
         viewer: struct {
             path: [:0]const u8,
             fs_store: lib.FS_Store = undefined,
+            entry_cur: *lib.FS_Store.Entry = undefined,
             scroll_state: rl.Vector2 = undefined,
             scroll_view: rl.Rectangle = undefined,
             dbg: struct {
@@ -69,7 +70,7 @@ pub fn main() anyerror!void {
 
     var page_next: ?Page = null;
 
-    // Main game loop
+    // Main loop
     while (!rl.windowShouldClose()) { // Detect window close button or ESC key
         // TODO: max water mark
         defer _ = frame_arena.reset(.retain_capacity);
@@ -86,6 +87,7 @@ pub fn main() anyerror!void {
                         page_current = page_prev;
                         break :page_swap;
                     };
+                    page_current.viewer.entry_cur = page_current.viewer.fs_store.root_entry_ptr;
                     const thread = Thread.spawn(.{}, lib.index_paths_starting_with, .{
                         page_current.viewer.path,
                         alloc_state,
@@ -196,11 +198,11 @@ pub fn main() anyerror!void {
                                     3,
                                     3.0,
                                 )),
-                                if (clay.cdefs.Clay_PointerOver(clay.IDI("TopLevelPath", @intCast(index)))) clay.Config.rectangle(.{
+                                if (clay.pointerOver(clay.IDI("TopLevelPath", @intCast(index)))) clay.Config.rectangle(.{
                                     .color = rl_color_to_arr(rl.Color.gray.brightness(0.8)),
                                 }) else ClayCustom.none(),
                             })({
-                                if (clay.cdefs.Clay_PointerOver(clay.IDI("TopLevelPath", @intCast(index))) and rl.isMouseButtonPressed(.left)) {
+                                if (clay.pointerOver(clay.IDI("TopLevelPath", @intCast(index))) and rl.isMouseButtonPressed(.left)) {
                                     std.debug.print("Clicked: {s}\n", .{path.path});
                                     page_next = Page.create_viewer(alloc_state.dupeZ(u8, path.path) catch unreachable);
                                 }
@@ -235,11 +237,11 @@ pub fn main() anyerror!void {
             .viewer => |*viewer_data| {
                 const dir_entries: []DirEntry = blk: {
                     const store = viewer_data.fs_store;
-                    const root = store.root_entry_ptr;
-                    if (root.children_count == 0) {
+                    const entry_cur = viewer_data.entry_cur;
+                    if (entry_cur.children_count == 0) {
                         break :blk &[_]DirEntry{};
                     }
-                    const children = store.entries[root.children_start..][0..root.children_count];
+                    const children = store.entries[entry_cur.children_start..][0..entry_cur.children_count];
                     const dir_entries = try frame_arena_alloc.alloc(DirEntry, children.len);
                     for (children, dir_entries) |*child, *dir_entry| {
                         if (child.parent != lib.FS_Store.ROOT_ENTRY_INDEX) {
