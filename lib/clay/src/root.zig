@@ -482,6 +482,7 @@ pub const getScrollContainerData = cdefs.Clay_GetScrollContainerData;
 pub const renderCommandArrayGet = cdefs.Clay_RenderCommandArray_Get;
 pub const setDebugModeEnabled = cdefs.Clay_SetDebugModeEnabled;
 pub const hashString = cdefs.Clay__HashString;
+pub const hovered = cdefs.Clay_Hovered;
 
 pub fn createArenaWithCapacityAndMemory(buffer: []u8) Arena {
     return cdefs.Clay_CreateArenaWithCapacityAndMemory(@intCast(buffer.len), buffer.ptr);
