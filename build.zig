@@ -15,11 +15,31 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
+    // Base module
+    const mod_base = b.createModule(.{
+        .root_source_file = b.path("src/base/base.zig"),
+        .optimize = optimize,
+        .target = target,
+    });
+
+    const base_lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = "base",
+        .root_module = mod_base,
+    });
+    b.installArtifact(base_lib);
+
+    const base_tests = b.addTest(.{
+        .root_module = mod_base,
+    });
+    const run_base_tests = b.addRunArtifact(base_tests);
+
     const lib_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
+    lib_mod.addImport("base", mod_base);
 
     const lib = b.addLibrary(.{
         .linkage = .static,
@@ -37,6 +57,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    exe_mod.addImport("base", mod_base);
 
     const exe = b.addExecutable(.{
         .name = "chonk",
@@ -112,6 +133,7 @@ pub fn build(b: *std.Build) void {
     // the `zig build --help` menu, providing a way for the user to request
     // running the unit tests.
     const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_base_tests.step);
     test_step.dependOn(&run_lib_unit_tests.step);
     test_step.dependOn(&run_exe_unit_tests.step);
 }
