@@ -70,6 +70,8 @@ pub fn main() anyerror!void {
 
     var page_next: ?Page = null;
 
+    var entry_next: ?*lib.FS_Store.Entry = null;
+
     // Main loop
     while (!rl.windowShouldClose()) { // Detect window close button or ESC key
         // TODO: max water mark
@@ -235,6 +237,10 @@ pub fn main() anyerror!void {
                 });
             },
             .viewer => |*viewer_data| {
+                if (entry_next) |entry_next_ptr| {
+                    viewer_data.entry_cur = entry_next_ptr;
+                    entry_next = null;
+                }
                 const dir_entries: []DirEntry = blk: {
                     const store = viewer_data.fs_store;
                     const entry_cur = viewer_data.entry_cur;
@@ -252,6 +258,7 @@ pub fn main() anyerror!void {
                         dir_entry.* = DirEntry{
                             .name = @ptrCast(child.name[0..child.name_len]),
                             .size_bytes = child.byte_count,
+                            .fs_store_entry_ptr = child,
                         };
                     }
                     std.sort.insertion(DirEntry, dir_entries, {}, DirEntry.gt_than);
@@ -325,7 +332,13 @@ pub fn main() anyerror!void {
                             .padding = clay.Padding.all(32),
                         }),
                     })({
-                        const child_sizing: clay.Sizing = if (win_dims.w < win_dims.h) .{ .w = clay.SizingAxis.grow, .h = clay.SizingAxis.percent(0.5) } else .{ .w = clay.SizingAxis.percent(0.5), .h = clay.SizingAxis.grow };
+                        const child_sizing: clay.Sizing = if (win_dims.w < win_dims.h) .{
+                            .w = clay.SizingAxis.grow,
+                            .h = clay.SizingAxis.percent(0.5),
+                        } else .{
+                            .w = clay.SizingAxis.percent(0.5),
+                            .h = clay.SizingAxis.grow,
+                        };
                         clay.UI(&.{
                             clay.Config.layout(.{
                                 .sizing = child_sizing,
@@ -371,6 +384,27 @@ pub fn main() anyerror!void {
 
                                     const size_str = fmt_file_size(frame_arena_alloc, entry.size_bytes);
                                     clay.text(size_str, clay.Config.text(.{ .letter_spacing = 4, .wrap_mode = .none }));
+                                    clay.UI(&.{clay.Config.layout(.{ .sizing = .{ .w = clay.SizingAxis.fixed(20) } })})({});
+
+                                    const nav_button_id = clay.Config.IDI("Dir_Entry_Nav_Button", @intCast(index));
+
+                                    clay.UI(&.{
+                                        nav_button_id,
+                                        clay.Config.layout(.{
+                                            .sizing = .{ .w = clay.SizingAxis.percent(0.10), .h = clay.SizingAxis.grow },
+                                            .child_alignment = .{ .x = .CENTER },
+                                            .padding = .{ .x = 8, .y = 4 },
+                                        }),
+                                        clay.Config.rectangle(.{
+                                            .color = rl_color_to_arr(rl.Color.sky_blue),
+                                            .corner_radius = clay.CornerRadius.all(4),
+                                        }),
+                                    })({
+                                        if (clay.pointerOver(nav_button_id.id) and rl.isMouseButtonDown(.left)) {
+                                            entry_next = entry.fs_store_entry_ptr;
+                                        }
+                                        clay.text("->", clay.Config.text(.{ .letter_spacing = 4 }));
+                                    });
                                 });
                             }
                         });
@@ -708,6 +742,7 @@ pub fn main() anyerror!void {
 const DirEntry = struct {
     name: [:0]const u8,
     size_bytes: u64,
+    fs_store_entry_ptr: *lib.FS_Store.Entry,
 
     fn gt_than(_: void, lhs: DirEntry, rhs: DirEntry) bool {
         if (lhs.size_bytes == rhs.size_bytes) {
