@@ -244,17 +244,13 @@ pub fn main() anyerror!void {
                 const dir_entries: []DirEntry = blk: {
                     const store = viewer_data.fs_store;
                     const entry_cur = viewer_data.entry_cur;
-                    if (entry_cur.children_count == 0) {
+                    if (entry_cur.children_count == 0 or @atomicLoad(u8, &entry_cur.lock_this, .acquire) != 0) {
+                        std.debug.print("NO ENTRIES YET\n", .{});
                         break :blk &[_]DirEntry{};
                     }
                     const children = store.entries[entry_cur.children_start..][0..entry_cur.children_count];
                     const dir_entries = try frame_arena_alloc.alloc(DirEntry, children.len);
                     for (children, dir_entries) |*child, *dir_entry| {
-                        if (child.parent != lib.FS_Store.ROOT_ENTRY_INDEX) {
-                            // not all init
-                            // FIXME: use some space for a checksum (0xdeadbeef) to detect incomplete initialization
-                            break :blk &[_]DirEntry{};
-                        }
                         dir_entry.* = DirEntry{
                             .name = @ptrCast(child.name[0..child.name_len]),
                             .size_bytes = child.byte_count,
@@ -262,6 +258,7 @@ pub fn main() anyerror!void {
                         };
                     }
                     std.sort.insertion(DirEntry, dir_entries, {}, DirEntry.gt_than);
+                    std.debug.print("ENTRY COUNT {}\n", .{dir_entries.len});
                     break :blk dir_entries;
                 };
 

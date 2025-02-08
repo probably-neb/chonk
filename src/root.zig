@@ -363,6 +363,7 @@ pub const FS_Store = struct {
         // FIXME: use self.ptr[0..PAGE_SIZE - Entry.SIZE] for metadata
         self.root_entry_ptr = @ptrCast(self.ptr + PAGE_SIZE - Entry.SIZE);
         self.root_entry_ptr.* = mem.zeroes(Entry);
+        self.root_entry_ptr.lock_this = 1;
 
         // TODO: save root_entry_name len somehow in root entry (cast name as u16 and store there?)
 
@@ -514,6 +515,8 @@ pub const FS_Store = struct {
             // std.debug.assert(self.children.len == 0 or &self.children.ptr[0] != self.cur);
             std.debug.assert(mem.eql(u8, self.parent.name[0..self.parent.name_len], path));
 
+            @atomicStore(u8, &self.cur.lock_this, 1, .release);
+
             // TODO: put behind is_new flag
             {
                 self.parent.block_count += self.cur.block_count;
@@ -559,6 +562,7 @@ pub const FS_Store = struct {
 
         pub fn children_end(self: *Cursor) void {
             std.debug.assert(self.children_next == self.children.len);
+            @atomicStore(u8, &self.cur.lock_this, 0, .release);
         }
 
         pub fn child_init(
@@ -566,6 +570,7 @@ pub const FS_Store = struct {
         ) *Entry {
             std.debug.assert(self.children_next < self.children.len);
             const ptr = &self.children[self.children_next];
+            ptr.lock_this = 1;
             // FIXME: self.cur_idx
             ptr.parent = self.cur_idx;
             return ptr;
