@@ -135,7 +135,7 @@ const dbg_print = if (DBG_PRINT_ENABLE) std.debug.print else struct {
     }
 }.print;
 
-pub fn index_paths_starting_with(root_path: [:0]const u8, base_alloc: Allocator, store: *FS_Store, files_indexed: *u64) void {
+pub fn index_paths_starting_with(root_path: [:0]const u8, base_alloc: Allocator, store: *FS_Store, files_indexed: *u64, cancelled: *std.atomic.Value(bool)) void {
     const fs = std.fs;
     var timer = std.time.Timer.start() catch null;
     // defer base_alloc.free(root_path);
@@ -167,6 +167,11 @@ pub fn index_paths_starting_with(root_path: [:0]const u8, base_alloc: Allocator,
     defer base_alloc.free(prev_path);
 
     while (fts_entry) |fts_ent| : (fts_entry = fts.fts_read(state)) {
+        // Check if we've been cancelled (e.g., user navigated away)
+        if (cancelled.load(.acquire)) {
+            dbg_print("INDEXING CANCELLED\n", .{});
+            return;
+        }
         if (fts_ent.fts_level == 0 and cursor.depth == 1) {
             std.debug.print("INDEXING COMPLETED: {}ms FINAL SIZE={} bytes\n", .{
                 (if (timer) |*t| t.read() else 0) / std.time.ns_per_ms,
@@ -380,6 +385,12 @@ pub const FS_Store = struct {
         self.entries = entries_ptr[0..entries_count_max];
     }
 
+    pub fn deinit(self: *FS_Store) void {
+        const mem_slice: []align(PAGE_SIZE) u8 = @alignCast(self.ptr[0..MMAP_SIZE]);
+        posix.munmap(mem_slice);
+        self.* = undefined;
+    }
+
     pub fn new_cursor_at(self: *FS_Store, path: []const u8) !Cursor {
         // TODO: look at root node at end of metadata page
         //       if root not empty => assert is subpath & recurse & find then initialize with partent etc
@@ -515,7 +526,7 @@ pub const FS_Store = struct {
             // std.debug.assert(self.children.len == 0 or &self.children.ptr[0] != self.cur);
             std.debug.assert(mem.eql(u8, self.parent.name[0..self.parent.name_len], path));
 
-            @atomicStore(u8, &self.cur.lock_this, 1, .release);
+            @atomicStore(u8, &self.cur.lock_this, 0, .release);
 
             // TODO: put behind is_new flag
             {

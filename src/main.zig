@@ -50,6 +50,8 @@ pub fn main() anyerror!void {
             entry_cur: *lib.FS_Store.Entry = undefined,
             scroll_state: rl.Vector2 = undefined,
             scroll_view: rl.Rectangle = undefined,
+            cancelled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+            worker_thread: ?std.Thread = null,
             dbg: struct {
                 files_indexed: u64 = 0,
                 files_indexed_prev: u64 = 0,
@@ -78,6 +80,22 @@ pub fn main() anyerror!void {
         defer _ = frame_arena.reset(.retain_capacity);
         if (page_next) |pn| page_swap: {
             defer page_next = null;
+            // Signal cancellation and wait for worker thread BEFORE swapping pages,
+            // while the pointers the thread holds are still valid
+            // Clean up current page BEFORE swapping, while we have mutable access
+            switch (page_current) {
+                .select => {},
+                .viewer => |*viewer_data| {
+                    viewer_data.cancelled.store(true, .release);
+                    // Wait for the worker thread to finish before invalidating pointers
+                    if (viewer_data.worker_thread) |wt| {
+                        wt.join();
+                        viewer_data.worker_thread = null;
+                    }
+                    viewer_data.fs_store.deinit();
+                    alloc_state.free(viewer_data.path);
+                },
+            }
             const page_prev = page_current;
             page_current = pn;
             switch (pn) {
@@ -90,11 +108,12 @@ pub fn main() anyerror!void {
                         break :page_swap;
                     };
                     page_current.viewer.entry_cur = page_current.viewer.fs_store.root_entry_ptr;
-                    const thread = Thread.spawn(.{}, lib.index_paths_starting_with, .{
+                    page_current.viewer.worker_thread = Thread.spawn(.{}, lib.index_paths_starting_with, .{
                         page_current.viewer.path,
                         alloc_state,
                         &page_current.viewer.fs_store,
                         &page_current.viewer.dbg.files_indexed,
+                        &page_current.viewer.cancelled,
                     }) catch |err| {
                         std.debug.print("ERROR: failed to spawn worker thread: {any}\n", .{err});
                         // viewer_data.worker_thread_pool_running.reset();
@@ -103,14 +122,6 @@ pub fn main() anyerror!void {
                         page_current = page_prev;
                         break :page_swap;
                     };
-                    thread.detach();
-                },
-            }
-            switch (page_prev) {
-                .select => {},
-                .viewer => |viewer_data| {
-                    alloc_state.free(viewer_data.path);
-                    // TODO: deinit fs_store? and kill thread
                 },
             }
         }
