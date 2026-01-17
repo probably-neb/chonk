@@ -202,7 +202,7 @@ pub fn main() anyerror!void {
                                 )),
                                 if (clay.pointerOver(clay.IDI("TopLevelPath", @intCast(index)))) clay.Config.rectangle(.{
                                     .color = rl_color_to_arr(rl.Color.gray.brightness(0.8)),
-                                }) else ClayCustom.none(),
+                                }) else ClayCustom.noneConfig(),
                             })({
                                 if (clay.pointerOver(clay.IDI("TopLevelPath", @intCast(index))) and rl.isMouseButtonPressed(.left)) {
                                     std.debug.print("Clicked: {s}\n", .{path.path});
@@ -536,7 +536,7 @@ pub fn main() anyerror!void {
             const render_command = clay.renderCommandArrayGet(&ui_draw_commands, @intCast(i));
             const render_text = render_command.text.chars[0..@abs(render_command.text.length)];
             const bounding_box = render_command.bounding_box;
-            const rec = .{
+            const rec: rl.Rectangle = .{
                 .x = bounding_box.x,
                 .y = bounding_box.y,
                 .width = bounding_box.width,
@@ -722,14 +722,14 @@ pub fn main() anyerror!void {
 
             const debug_text_size = 32;
 
-            rgui.guiSetStyle(.default, rgui.GuiDefaultProperty.text_size, debug_text_size);
+            rgui.setStyle(.default, .{ .default = .text_size }, debug_text_size);
 
-            const dbg_text = std.fmt.allocPrintZ(frame_arena_alloc, "FPS={: >4} | FT={: >4}ms | IDX={: >5}/s | FILES={}", .{
+            const dbg_text = std.fmt.allocPrintSentinel(frame_arena_alloc, "FPS={: >4} | FT={: >4}ms | IDX={: >5}/s | FILES={}", .{
                 frame_rate,
                 round_to_decimal_places(frame_time / std.time.ms_per_s, 5),
                 round_to_decimal_places(files_per_second, 5),
                 files_total,
-            }) catch {
+            }, 0) catch {
                 break :dbg;
             };
             rl.drawText(dbg_text, 0, rl.getRenderHeight() - debug_text_size - 5, debug_text_size, rl.Color.black);
@@ -831,12 +831,12 @@ fn squarify(alloc: Allocator, dir_entries: []const DirEntry, rect: rl.Rectangle)
             const d = row_weights.items[j] / z;
             const color = row_colors.items[j];
             if (vertical) {
-                const rec = .{ .x = rx, .y = ry, .width = z, .height = d };
+                const rec: rl.Rectangle = .{ .x = rx, .y = ry, .width = z, .height = d };
                 rl.drawRectangleRec(rec, color);
                 rl.drawRectangleLinesEx(rec, 3, rl.Color.light_gray);
                 ry = ry + d;
             } else {
-                const rec = .{ .x = rx, .y = ry, .width = d, .height = z };
+                const rec: rl.Rectangle = .{ .x = rx, .y = ry, .width = d, .height = z };
                 rl.drawRectangleRec(rec, color);
                 rl.drawRectangleLinesEx(rec, 3, rl.Color.light_gray);
                 rx = rx + d;
@@ -859,7 +859,20 @@ fn squarify(alloc: Allocator, dir_entries: []const DirEntry, rect: rl.Rectangle)
 }
 
 fn fmt_file_size(alloc: Allocator, bytes: u64) [:0]const u8 {
-    return std.fmt.allocPrintZ(alloc, "{}", .{std.fmt.fmtIntSizeDec(bytes)}) catch "";
+    const units = [_][]const u8{ "B", "KB", "MB", "GB", "TB", "PB" };
+    var size: f64 = @floatFromInt(bytes);
+    var unit_idx: usize = 0;
+
+    while (size >= 1000.0 and unit_idx < units.len - 1) {
+        size /= 1000.0;
+        unit_idx += 1;
+    }
+
+    if (unit_idx == 0) {
+        return std.fmt.allocPrintSentinel(alloc, "{d} {s}", .{ bytes, units[0] }, 0) catch "";
+    } else {
+        return std.fmt.allocPrintSentinel(alloc, "{d:.1} {s}", .{ size, units[unit_idx] }, 0) catch "";
+    }
 }
 
 fn round_to_decimal_places(value: f64, decimal_places: usize) f64 {
@@ -1111,7 +1124,7 @@ const ClayCustom = union(enum) {
 
     const NONE: ClayCustom = .{ .none = {} };
 
-    pub fn none() clay.Config {
+    pub fn noneConfig() clay.Config {
         return clay.Config.custom(.{ .custom_data = @ptrCast(@constCast(&NONE)) });
     }
 };

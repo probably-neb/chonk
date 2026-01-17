@@ -11,7 +11,7 @@ pub const TopLevelPath = struct {
 };
 
 pub fn get_top_level_paths(alloc: Allocator, scratch: Allocator) ![]TopLevelPath {
-    var file_list = std.ArrayList(TopLevelPath).init(alloc);
+    var file_list = std.array_list.Managed(TopLevelPath).init(alloc);
 
     home: {
         const home_path = std.process.getEnvVarOwned(scratch, "HOME") catch |err| {
@@ -168,9 +168,9 @@ pub fn index_paths_starting_with(root_path: [:0]const u8, base_alloc: Allocator,
 
     while (fts_entry) |fts_ent| : (fts_entry = fts.fts_read(state)) {
         if (fts_ent.fts_level == 0 and cursor.depth == 1) {
-            std.debug.print("INDEXING COMPLETED: {}ms FINAL SIZE={}\n", .{
+            std.debug.print("INDEXING COMPLETED: {}ms FINAL SIZE={} bytes\n", .{
                 (if (timer) |*t| t.read() else 0) / std.time.ns_per_ms,
-                std.fmt.fmtIntSizeBin(cursor.store.extent * FS_Store.PAGE_SIZE),
+                cursor.store.extent * FS_Store.PAGE_SIZE,
             });
             return;
         }
@@ -323,7 +323,7 @@ pub const FS_Store = struct {
     extent_max: u32,
 
     const posix = std.posix;
-    const PAGE_SIZE = std.mem.page_size;
+    const PAGE_SIZE = std.heap.page_size_min;
     const MMAP_SIZE = PAGE_SIZE * 4_000_000; //6_000_000; // ~ 122GB of Virtual Address Space
 
     pub const ROOT_ENTRY_INDEX = std.math.maxInt(u32);
@@ -406,7 +406,7 @@ pub const FS_Store = struct {
         // TODO: free list
 
         // number of pages needed to hold all entries
-        const pages = @divTrunc((count * Entry.SIZE) + PAGE_SIZE - 1, PAGE_SIZE);
+        const pages: u32 = @intCast(@divTrunc((count * Entry.SIZE) + PAGE_SIZE - 1, PAGE_SIZE));
         // TODO: check we'ere under some high_water_mark or max file size
         std.debug.assert(self.extent + pages <= self.extent_max);
 
@@ -416,7 +416,7 @@ pub const FS_Store = struct {
         const page_start = self.extent;
         self.extent += pages;
         // convert page index to index within entries
-        const start_index = (page_start - HEADER_PAGES_COUNT) * ENTRIES_PER_PAGE;
+        const start_index: u32 = @intCast((page_start - HEADER_PAGES_COUNT) * ENTRIES_PER_PAGE);
         const entries: []Entry = self.entries[start_index..][0..count];
         {
             const entries_ptr_expected = @intFromPtr(@as([*]Entry, @ptrCast(self.ptr + (page_start * PAGE_SIZE))));

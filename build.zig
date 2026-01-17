@@ -1,7 +1,5 @@
 const std = @import("std");
 
-// const clay_build_zig = @import("./lib/clay/build.zig");
-
 // Although this function looks imperative, note that its job is to
 // declaratively construct a build graph that will be executed by an external
 // runner.
@@ -17,13 +15,16 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-    const lib = b.addStaticLibrary(.{
-        .name = "chonk",
-        // In this case the main source file is merely a path, however, in more
-        // complicated build scripts, this could be a generated file.
+    const lib_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
+    });
+
+    const lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = "chonk",
+        .root_module = lib_mod,
     });
 
     // This declares intent for the library to be installed into the standard
@@ -31,11 +32,15 @@ pub fn build(b: *std.Build) void {
     // running `zig build`).
     b.installArtifact(lib);
 
-    const exe = b.addExecutable(.{
-        .name = "chonk",
+    const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+    });
+
+    const exe = b.addExecutable(.{
+        .name = "chonk",
+        .root_module = exe_mod,
     });
 
     // raylib
@@ -50,15 +55,15 @@ pub fn build(b: *std.Build) void {
         const raylib_artifact = raylib_dep.artifact("raylib"); // raylib C library
 
         exe.linkLibrary(raylib_artifact);
-        exe.root_module.addImport("raylib", raylib);
-        exe.root_module.addImport("raygui", raygui);
+        exe_mod.addImport("raylib", raylib);
+        exe_mod.addImport("raygui", raygui);
     }
     {
         const zclay_dep = b.dependency("clay", .{
             .target = target,
             .optimize = optimize,
         });
-        exe.root_module.addImport("zclay", zclay_dep.module("zclay"));
+        exe_mod.addImport("zclay", zclay_dep.module("zclay"));
     }
 
     // This declares intent for the executable to be installed into the
@@ -92,17 +97,13 @@ pub fn build(b: *std.Build) void {
     // Creates a step for unit testing. This only builds the test executable
     // but does not run it.
     const lib_unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = lib_mod,
     });
 
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
 
     const exe_unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = exe_mod,
     });
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
