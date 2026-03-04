@@ -48,6 +48,7 @@ pub fn main() anyerror!void {
             path: [:0]const u8,
             fs_store: lib.FS_Store = undefined,
             entry_cur: *lib.FS_Store.Entry = undefined,
+            nav_stack: std.ArrayList(*lib.FS_Store.Entry) = .empty,
             scroll_state: rl.Vector2 = undefined,
             scroll_view: rl.Rectangle = undefined,
             cancelled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -92,6 +93,8 @@ pub fn main() anyerror!void {
                         wt.join();
                         viewer_data.worker_thread = null;
                     }
+                    viewer_data.nav_stack.deinit(alloc_state);
+                    viewer_data.nav_stack = .empty;
                     viewer_data.fs_store.deinit();
                     alloc_state.free(viewer_data.path);
                 },
@@ -108,6 +111,8 @@ pub fn main() anyerror!void {
                         break :page_swap;
                     };
                     page_current.viewer.entry_cur = page_current.viewer.fs_store.root_entry_ptr;
+                    page_current.viewer.nav_stack = .empty;
+                    page_current.viewer.nav_stack.append(alloc_state, page_current.viewer.fs_store.root_entry_ptr) catch unreachable;
                     page_current.viewer.worker_thread = Thread.spawn(.{}, lib.index_paths_starting_with, .{
                         page_current.viewer.path,
                         alloc_state,
@@ -283,25 +288,19 @@ pub fn main() anyerror!void {
                         .padding = clay.Padding.all(16),
                     }),
                 })({
-                    {
-                        const parent_page_elem_id = clay.getElementId("Page_Select");
+                    clay.UI(&.{
+                        clay.Config.layout(.{
+                            .direction = .LEFT_TO_RIGHT,
+                            .child_alignment = .{ .x = .LEFT, .y = .CENTER },
+                            .child_gap = 8,
+                            .sizing = .{ .w = clay.SizingAxis.grow },
+                            .padding = .{ .x = 56, .y = 0 },
+                        }),
+                    })({
+                        _ = clay.getElementId("Page_Select");
                         const back_button_id = clay.Config.ID("Viewer_Back_Btn");
                         clay.UI(&.{
                             back_button_id,
-                            clay.Config.floating(.{
-                                .offset = .{
-                                    .x = 16,
-                                    .y = 16,
-                                },
-                                .zIndex = 1,
-                                .expand = .{ .h = 0, .w = 0 },
-                                .pointerCaptureMode = .CAPTURE,
-                                .parentId = parent_page_elem_id.id,
-                                .attachment = .{
-                                    .element = .LEFT_TOP,
-                                    .parent = .LEFT_TOP,
-                                },
-                            }),
                             clay.Config.layout(.{
                                 .sizing = .{ .w = clay.SizingAxis.fixed(36), .h = clay.SizingAxis.fixed(36) },
                                 .padding = clay.Padding.all(4),
@@ -322,12 +321,44 @@ pub fn main() anyerror!void {
                                 .font_size = 32,
                             }));
                         });
-                    }
-                    // TODO: breadcrumbs...
-                    clay.text(viewer_data.path, clay.Config.text(.{
-                        .letter_spacing = 4,
-                        .font_size = 48,
-                    }));
+                        std.debug.print("stack_len={}\n", .{viewer_data.nav_stack.items.len});
+                        for (viewer_data.nav_stack.items, 0..) |crumb_entry, crumb_render_idx| {
+                            const crumb_is_current = crumb_entry == viewer_data.entry_cur;
+                            const crumb_is_root = crumb_entry == viewer_data.fs_store.root_entry_ptr;
+                            const crumb_button_id = clay.Config.IDI("Breadcrumb_Item", @intCast(crumb_render_idx));
+
+                            clay.UI(&.{
+                                crumb_button_id,
+                                clay.Config.layout(.{
+                                    .child_gap = 8,
+                                    .padding = .{ .x = 6, .y = 4 },
+                                }),
+                                if (clay.pointerOver(crumb_button_id.id) and !crumb_is_current) clay.Config.rectangle(.{
+                                    .color = rl_color_to_arr(rl.Color.gray.brightness(0.92)),
+                                    .corner_radius = clay.CornerRadius.all(3),
+                                }) else ClayCustom.noneConfig(),
+                            })({
+                                if (clay.pointerOver(crumb_button_id.id) and rl.isMouseButtonPressed(.left) and !crumb_is_current) {
+                                    viewer_data.entry_cur = crumb_entry;
+                                    while (viewer_data.nav_stack.items.len > 0 and viewer_data.nav_stack.items[viewer_data.nav_stack.items.len - 1] != crumb_entry) {
+                                        _ = viewer_data.nav_stack.pop();
+                                    }
+                                }
+                                const crumb_name = if (crumb_is_root) viewer_data.path else crumb_entry.name[0..crumb_entry.name_len];
+
+                                clay.text(crumb_name, clay.Config.text(.{
+                                    .letter_spacing = 2,
+                                    .font_size = 26,
+                                    .color = rl_color_to_arr(rl.Color.black.brightness(if (crumb_is_current) 0.4 else 0.2)),
+                                }));
+                                clay.text("/", clay.Config.text(.{
+                                    .letter_spacing = 2,
+                                    .font_size = 26,
+                                    .color = rl_color_to_arr(rl.Color.black.brightness(if (crumb_is_current) 0.4 else 0.2)),
+                                }));
+                            });
+                        }
+                    });
                     clay.UI(&.{
                         clay.Config.layout(.{
                             .direction = if (win_dims.w > win_dims.h) .LEFT_TO_RIGHT else .TOP_TO_BOTTOM,
@@ -408,8 +439,9 @@ pub fn main() anyerror!void {
                                             .corner_radius = clay.CornerRadius.all(4),
                                         }),
                                     })({
-                                        if (clay.pointerOver(nav_button_id.id) and rl.isMouseButtonDown(.left)) {
+                                        if (clay.pointerOver(nav_button_id.id) and rl.isMouseButtonPressed(.left)) {
                                             entry_next = entry.fs_store_entry_ptr;
+                                            try viewer_data.nav_stack.append(alloc_state, entry.fs_store_entry_ptr);
                                         }
                                         clay.text("->", clay.Config.text(.{ .letter_spacing = 4 }));
                                     });
