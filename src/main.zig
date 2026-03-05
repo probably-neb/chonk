@@ -9,13 +9,55 @@ const rl = @import("raylib");
 const rgui = @import("raygui");
 const clay = @import("zclay");
 
+const alloc_state = std.heap.page_allocator;
+var frame_arena = std.heap.ArenaAllocator.init(alloc_state);
+const frame_arena_alloc: Allocator = frame_arena.allocator();
+
 const FONT_COUNT = 1;
 var fonts: [FONT_COUNT]rl.Font = undefined;
 
-pub fn main() anyerror!void {
-    const screenWidth = 600;
-    const screenHeight = 800;
+var page_current: Page = Page.create_select();
+var page_next: ?Page = null;
+var entry_next: ?*lib.FS_Store.Entry = null;
+const screenWidth = 600;
+const screenHeight = 800;
 
+var win_dims: clay.Dimensions = .{
+    .w = @floatFromInt(screenWidth),
+    .h = @floatFromInt(screenHeight),
+};
+
+const Page = union(enum) {
+    select: struct {
+        paths: ?[]lib.TopLevelPath = null,
+    },
+    viewer: struct {
+        path: [:0]const u8,
+        fs_store: lib.FS_Store = undefined,
+        entry_cur: *lib.FS_Store.Entry = undefined,
+        nav_stack: std.ArrayList(*lib.FS_Store.Entry) = .empty,
+        scroll_state: rl.Vector2 = undefined,
+        scroll_view: rl.Rectangle = undefined,
+        cancelled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+        worker_thread: ?std.Thread = null,
+        dbg: struct {
+            files_indexed: u64 = 0,
+            files_indexed_prev: u64 = 0,
+        } = .{},
+    },
+
+    const ViewerData = @FieldType(Page, "viewer");
+    const SelectData = @FieldType(Page, "select");
+
+    pub fn create_viewer(path: [:0]const u8) Page {
+        return .{ .viewer = .{ .path = path } };
+    }
+    pub fn create_select() Page {
+        return .{ .select = .{} };
+    }
+};
+
+pub fn main() anyerror!void {
     rl.setConfigFlags(.{
         .window_undecorated = true,
         .window_unfocused = true,
@@ -26,7 +68,6 @@ pub fn main() anyerror!void {
     defer rl.closeWindow();
 
     rl.setTargetFPS(60);
-    const alloc_state = std.heap.page_allocator;
 
     fonts[0] = try rl.getFontDefault();
 
@@ -36,44 +77,6 @@ pub fn main() anyerror!void {
     _ = clay.initialize(clay_arena, .{ .h = screenHeight, .w = screenWidth }, .{});
 
     clay.setMeasureTextFunction(clay_measure_text);
-
-    var frame_arena = std.heap.ArenaAllocator.init(alloc_state);
-    const frame_arena_alloc = frame_arena.allocator();
-
-    const Page = union(enum) {
-        select: struct {
-            paths: ?[]lib.TopLevelPath = null,
-        },
-        viewer: struct {
-            path: [:0]const u8,
-            fs_store: lib.FS_Store = undefined,
-            entry_cur: *lib.FS_Store.Entry = undefined,
-            nav_stack: std.ArrayList(*lib.FS_Store.Entry) = .empty,
-            scroll_state: rl.Vector2 = undefined,
-            scroll_view: rl.Rectangle = undefined,
-            cancelled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-            worker_thread: ?std.Thread = null,
-            dbg: struct {
-                files_indexed: u64 = 0,
-                files_indexed_prev: u64 = 0,
-            } = .{},
-        },
-
-        const Page = @This();
-
-        pub fn create_viewer(path: [:0]const u8) Page {
-            return .{ .viewer = .{ .path = path } };
-        }
-        pub fn create_select() Page {
-            return .{ .select = .{} };
-        }
-    };
-
-    var page_current: Page = Page.create_select();
-
-    var page_next: ?Page = null;
-
-    var entry_next: ?*lib.FS_Store.Entry = null;
 
     // Main loop
     while (!rl.windowShouldClose()) { // Detect window close button or ESC key
@@ -134,7 +137,7 @@ pub fn main() anyerror!void {
         rl.beginDrawing();
         defer rl.endDrawing();
 
-        const win_dims: clay.Dimensions = .{
+        win_dims = .{
             .w = @floatFromInt(rl.getRenderWidth()),
             .h = @floatFromInt(rl.getRenderHeight()),
         };
@@ -161,624 +164,555 @@ pub fn main() anyerror!void {
 
         switch (page_current) {
             .select => |*select_data| {
-                // FIXME: cache
-                // FIXME: ensure no unessecary dupeZ in lib.get_top_level_paths
-                select_data.paths = lib.get_top_level_paths(frame_arena_alloc, frame_arena_alloc) catch |err| err: {
-                    std.debug.print("ERROR: Failed to retrieve file paths: {any}\n", .{err});
-                    break :err &.{};
-                };
-                clay.UI(&.{
-                    clay.Config.ID("Page_Select"),
-                    clay.Config.layout(.{
-                        .direction = .TOP_TO_BOTTOM,
-                        .sizing = .{ .h = clay.SizingAxis.grow, .w = clay.SizingAxis.grow },
-                        .child_alignment = .{ .x = .CENTER, .y = .TOP },
-                        .child_gap = 32,
-                    }),
-                })({
-                    clay.UI(&.{
-                        clay.Config.ID("Select_Title"), clay.Config.layout(.{
-                            .padding = clay.Padding.all(16),
-                            .sizing = .{ .w = clay.SizingAxis.fit, .h = clay.SizingAxis.fit },
-                        }),
-                    })({
-                        clay.text("Select Path or Drive to View", clay.Config.text(.{
-                            .font_size = 48,
-                            .letter_spacing = 4,
-                        }));
-                    });
-                    clay.UI(&.{
-                        clay.Config.ID("Select_Paths"),
-                        clay.Config.layout(.{
-                            .direction = .TOP_TO_BOTTOM,
-                            .child_alignment = .{ .x = .LEFT, .y = .TOP },
-                            .sizing = .{
-                                .w = clay.SizingAxis.percent(0.6),
-                                .h = clay.SizingAxis.fit,
-                            },
-                            .padding = clay.Padding.all(8),
-                            .child_gap = 16,
-                        }),
-                    })({
-                        for (select_data.paths.?, 0..) |path, index| {
-                            clay.UI(&.{
-                                clay.Config.IDI("TopLevelPath", @intCast(index)),
-                                clay.Config.layout(.{
-                                    .direction = .LEFT_TO_RIGHT,
-                                    .padding = clay.Padding.all(16),
-                                    .sizing = .{
-                                        .w = clay.SizingAxis.grow,
-                                        .h = clay.SizingAxis.grow,
-                                    },
-                                }),
-                                clay.Config.border(clay_border_all(
-                                    rl_color_to_arr(rl.Color.light_gray.brightness(0.25)),
-                                    3,
-                                    3.0,
-                                )),
-                                if (clay.pointerOver(clay.IDI("TopLevelPath", @intCast(index)))) clay.Config.rectangle(.{
-                                    .color = rl_color_to_arr(rl.Color.gray.brightness(0.8)),
-                                }) else ClayCustom.noneConfig(),
-                            })({
-                                if (clay.pointerOver(clay.IDI("TopLevelPath", @intCast(index))) and rl.isMouseButtonPressed(.left)) {
-                                    std.debug.print("Clicked: {s}\n", .{path.path});
-                                    page_next = Page.create_viewer(alloc_state.dupeZ(u8, path.path) catch unreachable);
-                                }
-                                clay.UI(&.{
-                                    clay.Config.layout(.{
-                                        .direction = .TOP_TO_BOTTOM,
-                                        .child_gap = 8,
-                                        .child_alignment = .{
-                                            .x = .LEFT,
-                                            .y = .CENTER,
-                                        },
-                                    }),
-                                })({
-                                    clay.text(path.path, clay.Config.text(.{
-                                        .color = rl_color_to_arr(rl.Color.black),
-                                        .letter_spacing = 2,
-                                        .font_size = 32,
-                                    }));
-                                    if (path.device) |device| {
-                                        clay.text(device, clay.Config.text(.{
-                                            .color = rl_color_to_arr(rl.Color.black.brightness(0.5)),
-                                            .letter_spacing = 2,
-                                            .font_size = 24,
-                                        }));
-                                    }
-                                });
-                            });
-                        }
-                    });
-                });
+                try render_select(select_data);
             },
             .viewer => |*viewer_data| {
-                if (entry_next) |entry_next_ptr| {
-                    viewer_data.entry_cur = entry_next_ptr;
-                    entry_next = null;
-                }
-                const dir_entries: []DirEntry = blk: {
-                    const store = viewer_data.fs_store;
-                    const entry_cur = viewer_data.entry_cur;
-                    if (entry_cur.children_count == 0 or @atomicLoad(u8, &entry_cur.lock_this, .acquire) != 0) {
-                        std.debug.print("NO ENTRIES YET\n", .{});
-                        break :blk &[_]DirEntry{};
-                    }
-                    const children = store.entries[entry_cur.children_start..][0..entry_cur.children_count];
-                    const dir_entries = try frame_arena_alloc.alloc(DirEntry, children.len);
-                    for (children, dir_entries) |*child, *dir_entry| {
-                        dir_entry.* = DirEntry{
-                            .name = @ptrCast(child.name[0..child.name_len]),
-                            .size_bytes = child.byte_count,
-                            .fs_store_entry_ptr = child,
-                        };
-                    }
-                    std.sort.insertion(DirEntry, dir_entries, {}, DirEntry.gt_than);
-                    std.debug.print("ENTRY COUNT {}\n", .{dir_entries.len});
-                    break :blk dir_entries;
-                };
-
-                clay.UI(&.{
-                    clay.Config.ID("Page_Select"),
-                    clay.Config.layout(.{
-                        .direction = .TOP_TO_BOTTOM,
-                        .sizing = .{ .h = clay.SizingAxis.grow, .w = clay.SizingAxis.grow },
-                        .child_alignment = .{ .x = .CENTER, .y = .TOP },
-                        .child_gap = 32,
-                        .padding = clay.Padding.all(16),
-                    }),
-                })({
-                    clay.UI(&.{
-                        clay.Config.layout(.{
-                            .direction = .LEFT_TO_RIGHT,
-                            .child_alignment = .{ .x = .LEFT, .y = .CENTER },
-                            .child_gap = 8,
-                            .sizing = .{ .w = clay.SizingAxis.grow },
-                            .padding = .{ .x = 56, .y = 0 },
-                        }),
-                    })({
-                        _ = clay.getElementId("Page_Select");
-                        const back_button_id = clay.Config.ID("Viewer_Back_Btn");
-                        clay.UI(&.{
-                            back_button_id,
-                            clay.Config.layout(.{
-                                .sizing = .{ .w = clay.SizingAxis.fixed(36), .h = clay.SizingAxis.fixed(36) },
-                                .padding = clay.Padding.all(4),
-                                .child_alignment = .{
-                                    .x = .CENTER,
-                                    .y = .CENTER,
-                                },
-                            }),
-                            clay.Config.rectangle(.{
-                                .color = rl_color_to_arr(rl.Color.gray.brightness(if (clay.pointerOver(back_button_id.id)) 0.9 else 0.8)),
-                                .corner_radius = clay.CornerRadius.all(1.0),
-                            }),
-                        })({
-                            if (clay.pointerOver(back_button_id.id) and rl.isMouseButtonPressed(.left)) {
-                                page_next = Page.create_select();
-                            }
-                            clay.text("<", clay.Config.text(.{
-                                .font_size = 32,
-                            }));
-                        });
-                        std.debug.print("stack_len={}\n", .{viewer_data.nav_stack.items.len});
-                        for (viewer_data.nav_stack.items, 0..) |crumb_entry, crumb_render_idx| {
-                            const crumb_is_current = crumb_entry == viewer_data.entry_cur;
-                            const crumb_is_root = crumb_entry == viewer_data.fs_store.root_entry_ptr;
-                            const crumb_button_id = clay.Config.IDI("Breadcrumb_Item", @intCast(crumb_render_idx));
-
-                            clay.UI(&.{
-                                crumb_button_id,
-                                clay.Config.layout(.{
-                                    .child_gap = 8,
-                                    .padding = .{ .x = 6, .y = 4 },
-                                }),
-                                if (clay.pointerOver(crumb_button_id.id) and !crumb_is_current) clay.Config.rectangle(.{
-                                    .color = rl_color_to_arr(rl.Color.gray.brightness(0.92)),
-                                    .corner_radius = clay.CornerRadius.all(3),
-                                }) else ClayCustom.noneConfig(),
-                            })({
-                                if (clay.pointerOver(crumb_button_id.id) and rl.isMouseButtonPressed(.left) and !crumb_is_current) {
-                                    viewer_data.entry_cur = crumb_entry;
-                                    while (viewer_data.nav_stack.items.len > 0 and viewer_data.nav_stack.items[viewer_data.nav_stack.items.len - 1] != crumb_entry) {
-                                        _ = viewer_data.nav_stack.pop();
-                                    }
-                                }
-                                const crumb_name = if (crumb_is_root) viewer_data.path else crumb_entry.name[0..crumb_entry.name_len];
-
-                                clay.text(crumb_name, clay.Config.text(.{
-                                    .letter_spacing = 2,
-                                    .font_size = 26,
-                                    .color = rl_color_to_arr(rl.Color.black.brightness(if (crumb_is_current) 0.4 else 0.2)),
-                                }));
-                                clay.text("/", clay.Config.text(.{
-                                    .letter_spacing = 2,
-                                    .font_size = 26,
-                                    .color = rl_color_to_arr(rl.Color.black.brightness(if (crumb_is_current) 0.4 else 0.2)),
-                                }));
-                            });
-                        }
-                    });
-                    clay.UI(&.{
-                        clay.Config.layout(.{
-                            .direction = if (win_dims.w > win_dims.h) .LEFT_TO_RIGHT else .TOP_TO_BOTTOM,
-                            .child_gap = 48,
-                            .child_alignment = .{
-                                .x = .CENTER,
-                                .y = .CENTER,
-                            },
-                            .sizing = .{ .w = clay.SizingAxis.grow, .h = clay.SizingAxis.grow },
-                            .padding = clay.Padding.all(32),
-                        }),
-                    })({
-                        const child_sizing: clay.Sizing = if (win_dims.w < win_dims.h) .{
-                            .w = clay.SizingAxis.grow,
-                            .h = clay.SizingAxis.percent(0.5),
-                        } else .{
-                            .w = clay.SizingAxis.percent(0.5),
-                            .h = clay.SizingAxis.grow,
-                        };
-                        clay.UI(&.{
-                            clay.Config.layout(.{
-                                .sizing = child_sizing,
-                                .direction = .TOP_TO_BOTTOM,
-                                .padding = .{
-                                    .x = 8,
-                                    .y = 16,
-                                },
-                            }),
-                            clay.Config.border(border: {
-                                const color = rl_color_to_arr(rl.Color.gray.brightness(0.8));
-                                var config = clay_border_all(color, 4, 8);
-                                config.between_children = .{
-                                    .width = 3,
-                                    .color = color,
-                                };
-                                break :border config;
-                            }),
-                            clay.Config.scroll(.{
-                                .vertical = true,
-                            }),
-                        })({
-                            for (dir_entries, 0..) |entry, index| {
-                                clay.UI(&.{
-                                    clay.Config.IDI("DirEntry", @intCast(index)),
-                                    clay.Config.layout(.{
-                                        .padding = clay.Padding.all(8),
-                                        .direction = .LEFT_TO_RIGHT,
-                                        .child_alignment = .{ .y = .CENTER },
-                                        .sizing = .{ .w = clay.SizingAxis.grow },
-                                    }),
-                                })({
-                                    clay.text(entry.name, clay.Config.text(.{
-                                        .font_size = 24,
-                                        .letter_spacing = 4,
-                                    }));
-
-                                    clay.UI(&.{
-                                        clay.Config.layout(.{
-                                            .sizing = .{ .w = clay.SizingAxis.grow },
-                                        }),
-                                    })({});
-
-                                    const size_str = fmt_file_size(frame_arena_alloc, entry.size_bytes);
-                                    clay.text(size_str, clay.Config.text(.{ .letter_spacing = 4, .wrap_mode = .none }));
-                                    clay.UI(&.{clay.Config.layout(.{ .sizing = .{ .w = clay.SizingAxis.fixed(20) } })})({});
-
-                                    const nav_button_id = clay.Config.IDI("Dir_Entry_Nav_Button", @intCast(index));
-
-                                    clay.UI(&.{
-                                        nav_button_id,
-                                        clay.Config.layout(.{
-                                            .sizing = .{ .w = clay.SizingAxis.percent(0.10), .h = clay.SizingAxis.grow },
-                                            .child_alignment = .{ .x = .CENTER },
-                                            .padding = .{ .x = 8, .y = 4 },
-                                        }),
-                                        clay.Config.rectangle(.{
-                                            .color = rl_color_to_arr(rl.Color.sky_blue),
-                                            .corner_radius = clay.CornerRadius.all(4),
-                                        }),
-                                    })({
-                                        if (clay.pointerOver(nav_button_id.id) and rl.isMouseButtonPressed(.left)) {
-                                            entry_next = entry.fs_store_entry_ptr;
-                                            try viewer_data.nav_stack.append(alloc_state, entry.fs_store_entry_ptr);
-                                        }
-                                        clay.text("->", clay.Config.text(.{ .letter_spacing = 4 }));
-                                    });
-                                });
-                            }
-                        });
-                        const dir_entries_data: ClayCustom = .{ .squarified_treemap = .{
-                            .dir_entries = dir_entries,
-                        } };
-                        clay.UI(&.{
-                            clay.Config.layout(.{
-                                .sizing = child_sizing,
-                            }),
-                            clay.Config.rectangle(.{
-                                .color = rl_color_to_arr(rl.Color.gray.brightness(0.5)),
-                            }),
-                            clay.Config.custom(.{
-                                .custom_data = @ptrCast(@constCast(&dir_entries_data)),
-                            }),
-                        })({});
-                    });
-                });
-
-                // {
-                //     const back_button_font_size = 32;
-                //     rgui.guiSetStyle(.default, rgui.GuiDefaultProperty.text_size, back_button_font_size);
-                //
-                //     if (rgui.guiButton(.{
-                //         .x = 5,
-                //         .y = 5,
-                //         .width = 40,
-                //         .height = 40,
-                //     }, "<") != 0) {
-                //         page_current = .{ .select = .{
-                //             .paths = null,
-                //         } };
-                //         break :frame;
-                //     }
-                // }
-                //
-                // const label_height: i32 = label: {
-                //     const label: [*:0]const u8 = viewer_data.path;
-                //     const label_font_size = 48;
-                //     const label_size = rl.measureTextEx(font_default, label, label_font_size, 0.1);
-                //     const label_top_pad = 10;
-                //
-                //     rl.drawText(
-                //         label,
-                //         @divTrunc(window_width, 2) - @divTrunc(@as(i32, @intFromFloat(label_size.x)), 2),
-                //         label_top_pad,
-                //         label_font_size,
-                //         rl.Color.black,
-                //     );
-                //     break :label @as(i32, @intFromFloat(label_size.y)) + label_top_pad + 20;
-                // };
-                //
-                // const window_width_f32: f32 = @floatFromInt(window_width);
-                // const window_height_f32: f32 = @floatFromInt(rl.getRenderHeight());
-                //
-                // const content_rect: rl.Rectangle = pad(.{
-                //     .x = 0,
-                //     .y = @floatFromInt(label_height),
-                //     .width = window_width_f32,
-                //     .height = window_height_f32 - @as(f32, @floatFromInt(label_height)),
-                // }, .{ .x = 50, .y = 25 });
-                // const scroll_rect, const tree_view_rect = divide_in_2_with_padding(
-                //     content_rect,
-                //     25,
-                // );
-                // // std.debug.print("FOUND {d} entries\n", .{dir_entries.len});
-                //
-                // const path_font_size = 32;
-                // const path_height = 60;
-                //
-                // const scroll_content = rl.Rectangle{
-                //     .x = 0,
-                //     .y = 0,
-                //     .width = scroll_rect.width,
-                //     .height = @floatFromInt(dir_entries.len * path_height),
-                // };
-                //
-                // _ = rgui.guiScrollPanel(scroll_rect, null, scroll_content, &viewer_data.scroll_state, &viewer_data.scroll_view);
-                //
-                // const showScrollBounds = false;
-                // if (showScrollBounds) {
-                //     rl.drawRectangleRec(.{
-                //         .x = scroll_rect.x + viewer_data.scroll_state.x,
-                //         .y = scroll_rect.y + viewer_data.scroll_state.y,
-                //         .width = scroll_content.width,
-                //         .height = scroll_content.height,
-                //     }, rl.Color.fade(rl.Color.gold, 0.1));
-                // }
-                //
-                // // const path_width = window_width_f32 * 0.5;
-                //
-                // rl.beginScissorMode(
-                //     @intFromFloat(viewer_data.scroll_view.x),
-                //     @intFromFloat(viewer_data.scroll_view.y),
-                //     @intFromFloat(viewer_data.scroll_view.width),
-                //     @intFromFloat(viewer_data.scroll_view.height),
-                // );
-                // const path_x = scroll_rect.x + 25;
-                //
-                // rgui.guiSetStyle(.default, rgui.GuiDefaultProperty.text_size, path_font_size);
-                //
-                // for (dir_entries, 0..) |file, i| {
-                //     const path_y = scroll_rect.y + @as(f32, @floatFromInt((i * path_height))) + viewer_data.scroll_state.y; // 30 pixels spacing between lines
-                //     rl.drawText(
-                //         file.name,
-                //         @intFromFloat(path_x),
-                //         @intFromFloat(path_y),
-                //         path_font_size,
-                //         rl.Color.black,
-                //     );
-                //     const size_text = fmt_file_size(frame_arena_alloc, file.size_bytes);
-                //     // std.debug.print("{s} size text {s}\n", .{ file.abs_path, size_text });
-                //     const size_text_size = rl.measureTextEx(font_default, size_text, path_font_size, 0);
-                //     rl.drawText(
-                //         size_text,
-                //         @intFromFloat(scroll_rect.x + scroll_rect.width - size_text_size.x - 75),
-                //         @intFromFloat(path_y),
-                //         path_font_size,
-                //         rl.Color.black,
-                //     );
-                // }
-                // rl.endScissorMode();
-                //
-                // squarify(frame_arena_alloc, dir_entries, tree_view_rect);
+                try render_viewer(viewer_data);
             },
         }
 
-        var ui_draw_commands: clay.ClayArray(clay.RenderCommand) = clay.endLayout();
-
-        for (0..ui_draw_commands.length) |i| {
-            const render_command = clay.renderCommandArrayGet(&ui_draw_commands, @intCast(i));
-            const render_text = render_command.text.chars[0..@abs(render_command.text.length)];
-            const bounding_box = render_command.bounding_box;
-            const rec: rl.Rectangle = .{
-                .x = bounding_box.x,
-                .y = bounding_box.y,
-                .width = bounding_box.width,
-                .height = bounding_box.height,
-            };
-            switch (render_command.command_type) {
-                .none => {},
-                .text => {
-                    const config = render_command.config.text_config;
-                    const font = fonts[config.font_id];
-
-                    rl.drawTextEx(
-                        font,
-                        try frame_arena_alloc.dupeZ(u8, render_text),
-                        .{ .x = bounding_box.x, .y = bounding_box.y },
-                        @floatFromInt(config.font_size),
-                        @floatFromInt(config.letter_spacing),
-                        rl_color_from_arr(config.color),
-                    );
-                },
-                .rectangle => {
-                    const config = render_command.config.rectangle_config;
-                    if (config.corner_radius.top_left > 0) {
-                        const radius = (config.corner_radius.top_left * 2) / @max(bounding_box.width, bounding_box.height);
-                        rl.drawRectangleRounded(
-                            rec,
-                            radius,
-                            8,
-                            rl_color_from_arr(config.color),
-                        );
-                    } else {
-                        rl.drawRectangleRec(
-                            rec,
-                            rl_color_from_arr(config.color),
-                        );
-                    }
-                },
-                .border => {
-                    const config = render_command.config.border_config;
-                    // Left border
-                    if (config.left.width > 0) {
-                        rl.drawRectangle(
-                            @intFromFloat(@round(bounding_box.x)),
-                            @intFromFloat(@round(bounding_box.y + config.corner_radius.top_left)),
-                            @intCast(config.left.width),
-                            @intFromFloat(@round(bounding_box.height - config.corner_radius.top_left - config.corner_radius.bottom_left)),
-                            rl_color_from_arr(config.left.color),
-                        );
-                    }
-                    // Right border
-                    if (config.right.width > 0) {
-                        rl.drawRectangle(
-                            @intFromFloat(@round(bounding_box.x + bounding_box.width - @as(f32, @floatFromInt(config.right.width)))),
-                            @intFromFloat(@round(bounding_box.y + config.corner_radius.top_right)),
-                            @intCast(config.right.width),
-                            @intFromFloat(@round(bounding_box.height - config.corner_radius.top_right - config.corner_radius.bottom_right)),
-                            rl_color_from_arr(config.right.color),
-                        );
-                    }
-                    // Top border
-                    if (config.top.width > 0) {
-                        rl.drawRectangle(
-                            @intFromFloat(@round(bounding_box.x + config.corner_radius.top_left)),
-                            @intFromFloat(@round(bounding_box.y)),
-                            @intFromFloat(@round(bounding_box.width - config.corner_radius.top_left - config.corner_radius.top_right)),
-                            @intCast(config.top.width),
-                            rl_color_from_arr(config.top.color),
-                        );
-                    }
-                    // Bottom border
-                    if (config.bottom.width > 0) {
-                        rl.drawRectangle(
-                            @intFromFloat(@round(bounding_box.x + config.corner_radius.bottom_left)),
-                            @intFromFloat(@round(bounding_box.y + bounding_box.height - @as(f32, @floatFromInt(config.bottom.width)))),
-                            @intFromFloat(@round(bounding_box.width - config.corner_radius.bottom_left - config.corner_radius.bottom_right)),
-                            @intCast(config.bottom.width),
-                            rl_color_from_arr(config.bottom.color),
-                        );
-                    }
-                    // Corner rings
-                    if (config.corner_radius.top_left > 0) {
-                        rl.drawRing(
-                            .{
-                                .x = @round(bounding_box.x + config.corner_radius.top_left),
-                                .y = @round(bounding_box.y + config.corner_radius.top_left),
-                            },
-                            @round(config.corner_radius.top_left - @as(f32, @floatFromInt(config.top.width))),
-                            config.corner_radius.top_left,
-                            180,
-                            270,
-                            10,
-                            rl_color_from_arr(config.top.color),
-                        );
-                    }
-                    if (config.corner_radius.top_right > 0) {
-                        rl.drawRing(
-                            .{
-                                .x = @round(bounding_box.x + bounding_box.width - config.corner_radius.top_right),
-                                .y = @round(bounding_box.y + config.corner_radius.top_right),
-                            },
-                            @round(config.corner_radius.top_right - @as(f32, @floatFromInt(config.top.width))),
-                            config.corner_radius.top_right,
-                            270,
-                            360,
-                            10,
-                            rl_color_from_arr(config.top.color),
-                        );
-                    }
-                    if (config.corner_radius.bottom_left > 0) {
-                        rl.drawRing(
-                            .{
-                                .x = @round(bounding_box.x + config.corner_radius.bottom_left),
-                                .y = @round(bounding_box.y + bounding_box.height - config.corner_radius.bottom_left),
-                            },
-                            @round(config.corner_radius.bottom_left - @as(f32, @floatFromInt(config.top.width))),
-                            config.corner_radius.bottom_left,
-                            90,
-                            180,
-                            10,
-                            rl_color_from_arr(config.bottom.color),
-                        );
-                    }
-                    if (config.corner_radius.bottom_right > 0) {
-                        rl.drawRing(
-                            .{
-                                .x = @round(bounding_box.x + bounding_box.width - config.corner_radius.bottom_right),
-                                .y = @round(bounding_box.y + bounding_box.height - config.corner_radius.bottom_right),
-                            },
-                            @round(config.corner_radius.bottom_right - @as(f32, @floatFromInt(config.bottom.width))),
-                            config.corner_radius.bottom_right,
-                            0.1,
-                            90,
-                            10,
-                            rl_color_from_arr(config.bottom.color),
-                        );
-                    }
-                },
-                .scissor_start => {
-                    rl.beginScissorMode(
-                        @intFromFloat(bounding_box.x),
-                        @intFromFloat(bounding_box.y),
-                        @intFromFloat(bounding_box.width),
-                        @intFromFloat(bounding_box.height),
-                    );
-                },
-                .scissor_end => {
-                    rl.endScissorMode();
-                },
-                .image => unreachable,
-                .custom => {
-                    const config = render_command.config.custom_config;
-                    const data: *ClayCustom = @ptrCast(@alignCast(config.custom_data));
-                    switch (data.*) {
-                        .none => {},
-                        .squarified_treemap => |treemap_data| {
-                            const dir_entries = treemap_data.dir_entries;
-                            const rect: rl.Rectangle = .{
-                                .x = bounding_box.x,
-                                .y = bounding_box.y,
-                                .width = bounding_box.width,
-                                .height = bounding_box.height,
-                            };
-                            squarify(frame_arena_alloc, dir_entries, rect);
-                        },
-                    }
-                },
-            }
-        }
-
-        const show_dbg_info = true;
-        if (show_dbg_info) dbg: {
-            const frame_rate = rl.getFPS();
-            const frame_time = rl.getFrameTime();
-
-            const files_per_second, const files_total = switch (page_current) {
-                .viewer => |*viewer_data| fps: {
-                    const files_per_second = @as(f64, @floatFromInt(viewer_data.dbg.files_indexed -| viewer_data.dbg.files_indexed_prev)) / frame_time;
-                    viewer_data.dbg.files_indexed_prev = viewer_data.dbg.files_indexed;
-                    break :fps .{ files_per_second, viewer_data.dbg.files_indexed };
-                },
-                .select => .{ 0, 0 },
-            };
-
-            const debug_text_size = 32;
-
-            rgui.setStyle(.default, .{ .default = .text_size }, debug_text_size);
-
-            const dbg_text = std.fmt.allocPrintSentinel(frame_arena_alloc, "FPS={: >4} | FT={: >4}ms | IDX={: >5}/s | FILES={}", .{
-                frame_rate,
-                round_to_decimal_places(frame_time / std.time.ms_per_s, 5),
-                round_to_decimal_places(files_per_second, 5),
-                files_total,
-            }, 0) catch {
-                break :dbg;
-            };
-            rl.drawText(dbg_text, 0, rl.getRenderHeight() - debug_text_size - 5, debug_text_size, rl.Color.black);
-        }
+        try draw();
     }
 }
+
+fn draw() !void {
+    var ui_draw_commands: clay.ClayArray(clay.RenderCommand) = clay.endLayout();
+
+    for (0..ui_draw_commands.length) |i| {
+        const render_command = clay.renderCommandArrayGet(&ui_draw_commands, @intCast(i));
+        const render_text = render_command.text.chars[0..@abs(render_command.text.length)];
+        const bounding_box = render_command.bounding_box;
+        const rec: rl.Rectangle = .{
+            .x = bounding_box.x,
+            .y = bounding_box.y,
+            .width = bounding_box.width,
+            .height = bounding_box.height,
+        };
+        switch (render_command.command_type) {
+            .none => {},
+            .text => {
+                const config = render_command.config.text_config;
+                const font = fonts[config.font_id];
+
+                rl.drawTextEx(
+                    font,
+                    try frame_arena_alloc.dupeZ(u8, render_text),
+                    .{ .x = bounding_box.x, .y = bounding_box.y },
+                    @floatFromInt(config.font_size),
+                    @floatFromInt(config.letter_spacing),
+                    rl_color_from_arr(config.color),
+                );
+            },
+            .rectangle => {
+                const config = render_command.config.rectangle_config;
+                if (config.corner_radius.top_left > 0) {
+                    const radius = (config.corner_radius.top_left * 2) / @max(bounding_box.width, bounding_box.height);
+                    rl.drawRectangleRounded(
+                        rec,
+                        radius,
+                        8,
+                        rl_color_from_arr(config.color),
+                    );
+                } else {
+                    rl.drawRectangleRec(
+                        rec,
+                        rl_color_from_arr(config.color),
+                    );
+                }
+            },
+            .border => {
+                const config = render_command.config.border_config;
+                // Left border
+                if (config.left.width > 0) {
+                    rl.drawRectangle(
+                        @intFromFloat(@round(bounding_box.x)),
+                        @intFromFloat(@round(bounding_box.y + config.corner_radius.top_left)),
+                        @intCast(config.left.width),
+                        @intFromFloat(@round(bounding_box.height - config.corner_radius.top_left - config.corner_radius.bottom_left)),
+                        rl_color_from_arr(config.left.color),
+                    );
+                }
+                // Right border
+                if (config.right.width > 0) {
+                    rl.drawRectangle(
+                        @intFromFloat(@round(bounding_box.x + bounding_box.width - @as(f32, @floatFromInt(config.right.width)))),
+                        @intFromFloat(@round(bounding_box.y + config.corner_radius.top_right)),
+                        @intCast(config.right.width),
+                        @intFromFloat(@round(bounding_box.height - config.corner_radius.top_right - config.corner_radius.bottom_right)),
+                        rl_color_from_arr(config.right.color),
+                    );
+                }
+                // Top border
+                if (config.top.width > 0) {
+                    rl.drawRectangle(
+                        @intFromFloat(@round(bounding_box.x + config.corner_radius.top_left)),
+                        @intFromFloat(@round(bounding_box.y)),
+                        @intFromFloat(@round(bounding_box.width - config.corner_radius.top_left - config.corner_radius.top_right)),
+                        @intCast(config.top.width),
+                        rl_color_from_arr(config.top.color),
+                    );
+                }
+                // Bottom border
+                if (config.bottom.width > 0) {
+                    rl.drawRectangle(
+                        @intFromFloat(@round(bounding_box.x + config.corner_radius.bottom_left)),
+                        @intFromFloat(@round(bounding_box.y + bounding_box.height - @as(f32, @floatFromInt(config.bottom.width)))),
+                        @intFromFloat(@round(bounding_box.width - config.corner_radius.bottom_left - config.corner_radius.bottom_right)),
+                        @intCast(config.bottom.width),
+                        rl_color_from_arr(config.bottom.color),
+                    );
+                }
+                // Corner rings
+                if (config.corner_radius.top_left > 0) {
+                    rl.drawRing(
+                        .{
+                            .x = @round(bounding_box.x + config.corner_radius.top_left),
+                            .y = @round(bounding_box.y + config.corner_radius.top_left),
+                        },
+                        @round(config.corner_radius.top_left - @as(f32, @floatFromInt(config.top.width))),
+                        config.corner_radius.top_left,
+                        180,
+                        270,
+                        10,
+                        rl_color_from_arr(config.top.color),
+                    );
+                }
+                if (config.corner_radius.top_right > 0) {
+                    rl.drawRing(
+                        .{
+                            .x = @round(bounding_box.x + bounding_box.width - config.corner_radius.top_right),
+                            .y = @round(bounding_box.y + config.corner_radius.top_right),
+                        },
+                        @round(config.corner_radius.top_right - @as(f32, @floatFromInt(config.top.width))),
+                        config.corner_radius.top_right,
+                        270,
+                        360,
+                        10,
+                        rl_color_from_arr(config.top.color),
+                    );
+                }
+                if (config.corner_radius.bottom_left > 0) {
+                    rl.drawRing(
+                        .{
+                            .x = @round(bounding_box.x + config.corner_radius.bottom_left),
+                            .y = @round(bounding_box.y + bounding_box.height - config.corner_radius.bottom_left),
+                        },
+                        @round(config.corner_radius.bottom_left - @as(f32, @floatFromInt(config.top.width))),
+                        config.corner_radius.bottom_left,
+                        90,
+                        180,
+                        10,
+                        rl_color_from_arr(config.bottom.color),
+                    );
+                }
+                if (config.corner_radius.bottom_right > 0) {
+                    rl.drawRing(
+                        .{
+                            .x = @round(bounding_box.x + bounding_box.width - config.corner_radius.bottom_right),
+                            .y = @round(bounding_box.y + bounding_box.height - config.corner_radius.bottom_right),
+                        },
+                        @round(config.corner_radius.bottom_right - @as(f32, @floatFromInt(config.bottom.width))),
+                        config.corner_radius.bottom_right,
+                        0.1,
+                        90,
+                        10,
+                        rl_color_from_arr(config.bottom.color),
+                    );
+                }
+            },
+            .scissor_start => {
+                rl.beginScissorMode(
+                    @intFromFloat(bounding_box.x),
+                    @intFromFloat(bounding_box.y),
+                    @intFromFloat(bounding_box.width),
+                    @intFromFloat(bounding_box.height),
+                );
+            },
+            .scissor_end => {
+                rl.endScissorMode();
+            },
+            .image => unreachable,
+            .custom => {
+                const config = render_command.config.custom_config;
+                const data: *ClayCustom = @ptrCast(@alignCast(config.custom_data));
+                switch (data.*) {
+                    .none => {},
+                    .squarified_treemap => |treemap_data| {
+                        const dir_entries = treemap_data.dir_entries;
+                        const rect: rl.Rectangle = .{
+                            .x = bounding_box.x,
+                            .y = bounding_box.y,
+                            .width = bounding_box.width,
+                            .height = bounding_box.height,
+                        };
+                        squarify(frame_arena_alloc, dir_entries, rect);
+                    },
+                }
+            },
+        }
+    }
+
+    const show_dbg_info = true;
+    if (show_dbg_info) dbg: {
+        const frame_rate = rl.getFPS();
+        const frame_time = rl.getFrameTime();
+
+        const files_per_second, const files_total = switch (page_current) {
+            .viewer => |*viewer_data| fps: {
+                const files_per_second = @as(f64, @floatFromInt(viewer_data.dbg.files_indexed -| viewer_data.dbg.files_indexed_prev)) / frame_time;
+                viewer_data.dbg.files_indexed_prev = viewer_data.dbg.files_indexed;
+                break :fps .{ files_per_second, viewer_data.dbg.files_indexed };
+            },
+            .select => .{ 0, 0 },
+        };
+
+        const debug_text_size = 32;
+
+        rgui.setStyle(.default, .{ .default = .text_size }, debug_text_size);
+
+        const dbg_text = std.fmt.allocPrintSentinel(frame_arena_alloc, "FPS={: >4} | FT={: >4}ms | IDX={: >5}/s | FILES={}", .{
+            frame_rate,
+            round_to_decimal_places(frame_time / std.time.ms_per_s, 5),
+            round_to_decimal_places(files_per_second, 5),
+            files_total,
+        }, 0) catch {
+            break :dbg;
+        };
+        rl.drawText(dbg_text, 0, rl.getRenderHeight() - debug_text_size - 5, debug_text_size, rl.Color.black);
+    }
+}
+
+fn render_select(select_data: *Page.SelectData) !void {
+    // FIXME: cache
+    // FIXME: ensure no unessecary dupeZ in lib.get_top_level_paths
+    select_data.paths = lib.get_top_level_paths(frame_arena_alloc, frame_arena_alloc) catch |err| err: {
+        std.debug.print("ERROR: Failed to retrieve file paths: {any}\n", .{err});
+        break :err &.{};
+    };
+    clay.UI(&.{
+        .ID("Page_Select"),
+        .layout(.{
+            .direction = .TOP_TO_BOTTOM,
+            .sizing = .{ .h = clay.SizingAxis.grow, .w = clay.SizingAxis.grow },
+            .child_alignment = .{ .x = .CENTER, .y = .TOP },
+            .child_gap = 32,
+        }),
+    })({
+        clay.UI(&.{
+            .ID("Select_Title"), .layout(.{
+                .padding = .all(16),
+                .sizing = .{ .w = .fit, .h = .fit },
+            }),
+        })({
+            clay.text("Select Path or Drive to View", .text(.{
+                .font_size = 48,
+                .letter_spacing = 4,
+            }));
+        });
+        clay.UI(&.{
+            .ID("Select_Paths"),
+            .layout(.{
+                .direction = .TOP_TO_BOTTOM,
+                .child_alignment = .{ .x = .LEFT, .y = .TOP },
+                .sizing = .{
+                    .w = clay.SizingAxis.percent(0.6),
+                    .h = clay.SizingAxis.fit,
+                },
+                .padding = clay.Padding.all(8),
+                .child_gap = 16,
+            }),
+        })({
+            for (select_data.paths.?, 0..) |path, index| {
+                render_select_entry(path, index);
+            }
+        });
+    });
+}
+
+fn render_select_entry(path: lib.TopLevelPath, index: usize) void {
+    clay.UI(&.{
+        .IDI("TopLevelPath", @intCast(index)),
+        .layout(.{
+            .direction = .LEFT_TO_RIGHT,
+            .padding = clay.Padding.all(16),
+            .sizing = .{
+                .w = clay.SizingAxis.grow,
+                .h = clay.SizingAxis.grow,
+            },
+        }),
+        .border(clay_border_all(
+            rl_color_to_arr(rl.Color.light_gray.brightness(0.25)),
+            3,
+            3.0,
+        )),
+        if (is_hovered(clay.IDI("TopLevelPath", @intCast(index)))) .rectangle(.{
+            .color = rl_color_to_arr(rl.Color.gray.brightness(0.8)),
+        }) else ClayCustom.noneConfig(),
+    })({
+        if (is_clicked(clay.IDI("TopLevelPath", @intCast(index)))) {
+            std.debug.print("Clicked: {s}\n", .{path.path});
+            page_next = Page.create_viewer(alloc_state.dupeZ(u8, path.path) catch unreachable);
+        }
+        clay.UI(&.{
+            .layout(.{
+                .direction = .TOP_TO_BOTTOM,
+                .child_gap = 8,
+                .child_alignment = .{
+                    .x = .LEFT,
+                    .y = .CENTER,
+                },
+            }),
+        })({
+            clay.text(path.path, .text(.{
+                .color = rl_color_to_arr(rl.Color.black),
+                .letter_spacing = 2,
+                .font_size = 32,
+            }));
+            if (path.device) |device| {
+                clay.text(device, .text(.{
+                    .color = rl_color_to_arr(rl.Color.black.brightness(0.5)),
+                    .letter_spacing = 2,
+                    .font_size = 24,
+                }));
+            }
+        });
+    });
+}
+
+fn render_viewer(viewer_data: *Page.ViewerData) !void {
+    if (entry_next) |entry_next_ptr| {
+        viewer_data.entry_cur = entry_next_ptr;
+        entry_next = null;
+    }
+    const dir_entries: []DirEntry = blk: {
+        const store = viewer_data.fs_store;
+        const entry_cur = viewer_data.entry_cur;
+        if (entry_cur.children_count == 0 or @atomicLoad(u8, &entry_cur.lock_this, .acquire) != 0) {
+            std.debug.print("NO ENTRIES YET\n", .{});
+            break :blk &[_]DirEntry{};
+        }
+        const children = store.entries[entry_cur.children_start..][0..entry_cur.children_count];
+        const dir_entries = try frame_arena_alloc.alloc(DirEntry, children.len);
+        for (children, dir_entries) |*child, *dir_entry| {
+            dir_entry.* = DirEntry{
+                .name = @ptrCast(child.name[0..child.name_len]),
+                .size_bytes = child.byte_count,
+                .fs_store_entry_ptr = child,
+            };
+        }
+        std.sort.insertion(DirEntry, dir_entries, {}, DirEntry.gt_than);
+        break :blk dir_entries;
+    };
+
+    const page_select_id = .ID("Page_Select");
+    clay.UI(&.{
+        page_select_id,
+        .layout(.{
+            .direction = .TOP_TO_BOTTOM,
+            .sizing = .{ .h = clay.SizingAxis.grow, .w = clay.SizingAxis.grow },
+            .child_alignment = .{ .x = .CENTER, .y = .TOP },
+            .child_gap = 32,
+            .padding = clay.Padding.all(16),
+        }),
+    })({
+        render_top_bar(viewer_data);
+        render_dir_entries(viewer_data, dir_entries);
+    });
+}
+
+fn render_dir_entries(viewer_data: *Page.ViewerData, dir_entries: []lib.FS_Store.Entry) void {
+    const orientation = if (win_dims.w > win_dims.h) .LEFT_TO_RIGHT else .TOP_TO_BOTTOM;
+    clay.UI(&.{
+        .layout(.{
+            .direction = orientation,
+            .child_gap = 48,
+            .child_alignment = .{
+                .x = .CENTER,
+                .y = .CENTER,
+            },
+            .sizing = .{ .w = clay.SizingAxis.grow, .h = clay.SizingAxis.grow },
+            .padding = clay.Padding.all(32),
+        }),
+    })({
+        const child_sizing = switch (orientation) {
+            .TOP_TO_BOTTOM => clay.Sizing{ .w = clay.SizingAxis.grow, .h = clay.SizingAxis.percent(0.5) },
+            .LEFT_TO_RIGHT => clay.Sizing{ .w = clay.SizingAxis.percent(0.5), .h = clay.SizingAxis.grow },
+        };
+        clay.UI(&.{
+            .layout(.{
+                .sizing = child_sizing,
+                .direction = .TOP_TO_BOTTOM,
+                .padding = .{
+                    .x = 8,
+                    .y = 16,
+                },
+            }),
+            .border(border: {
+                const color = rl_color_to_arr(rl.Color.gray.brightness(0.8));
+                var config = clay_border_all(color, 4, 8);
+                config.between_children = .{
+                    .width = 3,
+                    .color = color,
+                };
+                break :border config;
+            }),
+            .scroll(.{
+                .vertical = true,
+            }),
+        })({
+            for (dir_entries, 0..) |entry, index| {
+                render_dir_entry(viewer_data, entry, index);
+            }
+        });
+        const dir_entries_data: ClayCustom = .{ .squarified_treemap = .{
+            .dir_entries = dir_entries,
+        } };
+        clay.UI(&.{
+            .layout(.{
+                .sizing = child_sizing,
+            }),
+            .rectangle(.{
+                .color = rl_color_to_arr(rl.Color.gray.brightness(0.5)),
+            }),
+            .custom(.{
+                .custom_data = @ptrCast(@constCast(&dir_entries_data)),
+            }),
+        })({});
+    });
+}
+
+fn render_dir_entry(viewer_data: *Page.ViewerData, entry: lib.FS_Store.Entry, index: usize) void {
+    clay.UI(&.{
+        .IDI("DirEntry", @intCast(index)),
+        .layout(.{
+            .padding = clay.Padding.all(8),
+            .direction = .LEFT_TO_RIGHT,
+            .child_alignment = .{ .y = .CENTER },
+            .sizing = .{ .w = clay.SizingAxis.grow },
+        }),
+    })({
+        clay.text(entry.name, .text(.{
+            .font_size = 24,
+            .letter_spacing = 4,
+        }));
+
+        clay.UI(&.{
+            .layout(.{
+                .sizing = .{ .w = clay.SizingAxis.grow },
+            }),
+        })({});
+
+        const size_str = fmt_file_size(frame_arena_alloc, entry.size_bytes);
+        clay.text(size_str, .text(.{ .letter_spacing = 4, .wrap_mode = .none }));
+        clay.UI(&.{.layout(.{ .sizing = .{ .w = .fixed(20) } })})({});
+
+        const nav_button_id = .IDI("Dir_Entry_Nav_Button", @intCast(index));
+
+        clay.UI(&.{
+            nav_button_id,
+            .layout(.{
+                .sizing = .{ .w = .percent(0.10), .h = .grow },
+                .child_alignment = .{ .x = .CENTER },
+                .padding = .{ .x = 8, .y = 4 },
+            }),
+            .rectangle(.{
+                .color = rl_color_to_arr(rl.Color.sky_blue),
+                .corner_radius = clay.CornerRadius.all(4),
+            }),
+        })({
+            if (is_clicked(nav_button_id.id)) {
+                entry_next = entry.fs_store_entry_ptr;
+                try viewer_data.nav_stack.append(alloc_state, entry.fs_store_entry_ptr);
+            }
+            clay.text("->", .text(.{ .letter_spacing = 4 }));
+        });
+    });
+}
+
+fn render_top_bar(viewer_data: *Page.ViewerData) void {
+    clay.UI(&.{
+        .layout(.{
+            .direction = .LEFT_TO_RIGHT,
+            .child_alignment = .{ .x = .LEFT, .y = .CENTER },
+            .child_gap = 8,
+            .sizing = .{ .w = clay.SizingAxis.grow },
+            .padding = .{ .x = 56, .y = 0 },
+        }),
+    })({
+        const back_button_id = .ID("Viewer_Back_Btn");
+        clay.UI(&.{
+            back_button_id,
+            .layout(.{
+                .sizing = .{ .w = clay.SizingAxis.fixed(36), .h = clay.SizingAxis.fixed(36) },
+                .padding = clay.Padding.all(4),
+                .child_alignment = .{
+                    .x = .CENTER,
+                    .y = .CENTER,
+                },
+            }),
+            .rectangle(.{
+                .color = rl_color_to_arr(rl.Color.gray.brightness(if (is_hovered(back_button_id.id)) 0.9 else 0.8)),
+                .corner_radius = clay.CornerRadius.all(1.0),
+            }),
+        })({
+            if (is_hovered(back_button_id.id) and rl.isMouseButtonPressed(.left)) {
+                page_next = Page.create_select();
+            }
+            clay.text("<", .text(.{
+                .font_size = 32,
+            }));
+        });
+        render_breadcrumbs(viewer_data);
+    });
+}
+
+fn render_breadcrumbs(viewer_data: *Page.ViewerData) void {
+    for (viewer_data.nav_stack.items, 0..) |crumb_entry, crumb_render_idx| {
+        const crumb_is_current = crumb_entry == viewer_data.entry_cur;
+        const crumb_is_root = crumb_entry == viewer_data.fs_store.root_entry_ptr;
+        const crumb_button_id = .IDI("Breadcrumb_Item", @intCast(crumb_render_idx));
+
+        clay.UI(&.{
+            crumb_button_id,
+            .layout(.{
+                .child_gap = 8,
+                .padding = .{ .x = 6, .y = 4 },
+            }),
+            if (is_hovered(crumb_button_id.id) and !crumb_is_current) .rectangle(.{
+                .color = rl_color_to_arr(rl.Color.gray.brightness(0.92)),
+                .corner_radius = clay.CornerRadius.all(3),
+            }) else ClayCustom.noneConfig(),
+        })({
+            if (is_hovered(crumb_button_id.id) and rl.isMouseButtonPressed(.left) and !crumb_is_current) {
+                viewer_data.entry_cur = crumb_entry;
+                while (viewer_data.nav_stack.items.len > 0 and viewer_data.nav_stack.items[viewer_data.nav_stack.items.len - 1] != crumb_entry) {
+                    _ = viewer_data.nav_stack.pop();
+                }
+            }
+            const crumb_name = if (crumb_is_root) viewer_data.path else crumb_entry.name[0..crumb_entry.name_len];
+
+            clay.text(crumb_name, .text(.{
+                .letter_spacing = 2,
+                .font_size = 26,
+                .color = rl_color_to_arr(rl.Color.black.brightness(if (crumb_is_current) 0.4 else 0.2)),
+            }));
+            clay.text("/", .text(.{
+                .letter_spacing = 2,
+                .font_size = 26,
+                .color = rl_color_to_arr(rl.Color.black.brightness(if (crumb_is_current) 0.4 else 0.2)),
+            }));
+        });
+    }
+}
+
+fn is_clicked(id: clay.ElementId) bool {
+    return is_hovered(id) and rl.isMouseButtonPressed(.left);
+}
+
+fn is_hovered(id: clay.ElementId) bool {
+    return clay.pointerOver(id);
+}
+
 const DirEntry = struct {
     name: [:0]const u8,
     size_bytes: u64,
@@ -1168,6 +1102,6 @@ const ClayCustom = union(enum) {
     const NONE: ClayCustom = .{ .none = {} };
 
     pub fn noneConfig() clay.Config {
-        return clay.Config.custom(.{ .custom_data = @ptrCast(@constCast(&NONE)) });
+        return .custom(.{ .custom_data = @ptrCast(@constCast(&NONE)) });
     }
 };
