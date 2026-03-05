@@ -8,13 +8,24 @@ const colormaps = @import("colormaps.zig");
 const rl = @import("raylib");
 const rgui = @import("raygui");
 const clay = @import("zclay");
+const text = @import("text/mod.zig");
 
 const alloc_state = std.heap.page_allocator;
 var frame_arena = std.heap.ArenaAllocator.init(alloc_state);
 const frame_arena_alloc: Allocator = frame_arena.allocator();
 
-const FONT_COUNT = 1;
-var fonts: [FONT_COUNT]rl.Font = undefined;
+var font_system: text.FontSystem = undefined;
+
+const TEXT_DEBUG_ENABLE = true;
+const TEXT_DEBUG_MAX_MAP_LOGS: u32 = 64;
+const TEXT_DEBUG_MAX_DRAW_LOGS: u32 = 64;
+
+const TextDebugState = struct {
+    map_logs: u32 = 0,
+    draw_logs: u32 = 0,
+};
+
+var text_debug: TextDebugState = .{};
 
 var page_current: Page = Page.create_select();
 var page_next: ?Page = null;
@@ -69,7 +80,8 @@ pub fn main() anyerror!void {
 
     rl.setTargetFPS(60);
 
-    fonts[0] = try rl.getFontDefault();
+    font_system = try text.FontSystem.init(alloc_state, 32, 2048, 2048);
+    defer font_system.deinit();
 
     const clay_min_mem_amount: u32 = clay.minMemorySize();
     const clay_memory = try alloc_state.alloc(u8, clay_min_mem_amount);
@@ -192,11 +204,27 @@ fn draw() !void {
             .none => {},
             .text => {
                 const config = render_command.config.text_config;
-                const font = fonts[config.font_id];
 
-                rl.drawTextEx(
-                    font,
-                    try frame_arena_alloc.dupeZ(u8, render_text),
+                if (TEXT_DEBUG_ENABLE and text_debug.draw_logs < TEXT_DEBUG_MAX_DRAW_LOGS) {
+                    std.debug.print(
+                        "TEXT_DRAW[{d}] src_text_len={d} dst=({d:.2},{d:.2},{d:.2},{d:.2}) font_id={d} font_size={d} letter_spacing={d}\n",
+                        .{
+                            text_debug.draw_logs,
+                            render_text.len,
+                            bounding_box.x,
+                            bounding_box.y,
+                            bounding_box.width,
+                            bounding_box.height,
+                            config.font_id,
+                            config.font_size,
+                            config.letter_spacing,
+                        },
+                    );
+                    text_debug.draw_logs += 1;
+                }
+
+                font_system.drawText(
+                    render_text,
                     .{ .x = bounding_box.x, .y = bounding_box.y },
                     @floatFromInt(config.font_size),
                     @floatFromInt(config.letter_spacing),
@@ -361,6 +389,7 @@ fn draw() !void {
             .viewer => |*viewer_data| fps: {
                 const files_per_second = @as(f64, @floatFromInt(viewer_data.dbg.files_indexed -| viewer_data.dbg.files_indexed_prev)) / frame_time;
                 viewer_data.dbg.files_indexed_prev = viewer_data.dbg.files_indexed;
+
                 break :fps .{ files_per_second, viewer_data.dbg.files_indexed };
             },
             .select => .{ 0, 0 },
@@ -504,7 +533,7 @@ fn render_viewer(viewer_data: *Page.ViewerData) !void {
         break :blk dir_entries;
     };
 
-    const page_select_id = .ID("Page_Select");
+    const page_select_id = clay.Config.ID("Page_Select");
     clay.UI(&.{
         page_select_id,
         .layout(.{
@@ -520,8 +549,8 @@ fn render_viewer(viewer_data: *Page.ViewerData) !void {
     });
 }
 
-fn render_dir_entries(viewer_data: *Page.ViewerData, dir_entries: []lib.FS_Store.Entry) void {
-    const orientation = if (win_dims.w > win_dims.h) .LEFT_TO_RIGHT else .TOP_TO_BOTTOM;
+fn render_dir_entries(viewer_data: *Page.ViewerData, dir_entries: []DirEntry) void {
+    const orientation: clay.LayoutDirection = if (win_dims.w > win_dims.h) .LEFT_TO_RIGHT else .TOP_TO_BOTTOM;
     clay.UI(&.{
         .layout(.{
             .direction = orientation,
@@ -564,7 +593,11 @@ fn render_dir_entries(viewer_data: *Page.ViewerData, dir_entries: []lib.FS_Store
                 render_dir_entry(viewer_data, entry, index);
             }
         });
-        const dir_entries_data: ClayCustom = .{ .squarified_treemap = .{
+        const dir_entries_data = frame_arena_alloc.create(ClayCustom) catch {
+            std.debug.print("ERROR: failed to allocate ClayCustom in frame arena\n", .{});
+            return;
+        };
+        dir_entries_data.* = .{ .squarified_treemap = .{
             .dir_entries = dir_entries,
         } };
         clay.UI(&.{
@@ -575,13 +608,13 @@ fn render_dir_entries(viewer_data: *Page.ViewerData, dir_entries: []lib.FS_Store
                 .color = rl_color_to_arr(rl.Color.gray.brightness(0.5)),
             }),
             .custom(.{
-                .custom_data = @ptrCast(@constCast(&dir_entries_data)),
+                .custom_data = @ptrCast(@constCast(dir_entries_data)),
             }),
         })({});
     });
 }
 
-fn render_dir_entry(viewer_data: *Page.ViewerData, entry: lib.FS_Store.Entry, index: usize) void {
+fn render_dir_entry(viewer_data: *Page.ViewerData, entry: DirEntry, index: usize) void {
     clay.UI(&.{
         .IDI("DirEntry", @intCast(index)),
         .layout(.{
@@ -606,7 +639,7 @@ fn render_dir_entry(viewer_data: *Page.ViewerData, entry: lib.FS_Store.Entry, in
         clay.text(size_str, .text(.{ .letter_spacing = 4, .wrap_mode = .none }));
         clay.UI(&.{.layout(.{ .sizing = .{ .w = .fixed(20) } })})({});
 
-        const nav_button_id = .IDI("Dir_Entry_Nav_Button", @intCast(index));
+        const nav_button_id = clay.Config.IDI("Dir_Entry_Nav_Button", @intCast(index));
 
         clay.UI(&.{
             nav_button_id,
@@ -622,7 +655,9 @@ fn render_dir_entry(viewer_data: *Page.ViewerData, entry: lib.FS_Store.Entry, in
         })({
             if (is_clicked(nav_button_id.id)) {
                 entry_next = entry.fs_store_entry_ptr;
-                try viewer_data.nav_stack.append(alloc_state, entry.fs_store_entry_ptr);
+                viewer_data.nav_stack.append(alloc_state, entry.fs_store_entry_ptr) catch |err| {
+                    std.debug.print("ERROR: failed to append nav stack entry: {any}\n", .{err});
+                };
             }
             clay.text("->", .text(.{ .letter_spacing = 4 }));
         });
@@ -639,7 +674,7 @@ fn render_top_bar(viewer_data: *Page.ViewerData) void {
             .padding = .{ .x = 56, .y = 0 },
         }),
     })({
-        const back_button_id = .ID("Viewer_Back_Btn");
+        const back_button_id = clay.Config.ID("Viewer_Back_Btn");
         clay.UI(&.{
             back_button_id,
             .layout(.{
@@ -670,7 +705,7 @@ fn render_breadcrumbs(viewer_data: *Page.ViewerData) void {
     for (viewer_data.nav_stack.items, 0..) |crumb_entry, crumb_render_idx| {
         const crumb_is_current = crumb_entry == viewer_data.entry_cur;
         const crumb_is_root = crumb_entry == viewer_data.fs_store.root_entry_ptr;
-        const crumb_button_id = .IDI("Breadcrumb_Item", @intCast(crumb_render_idx));
+        const crumb_button_id = clay.Config.IDI("Breadcrumb_Item", @intCast(crumb_render_idx));
 
         clay.UI(&.{
             crumb_button_id,
@@ -1006,61 +1041,17 @@ pub fn generate_palette(
     return colors;
 }
 
-fn clay_measure_text(text: []const u8, ctx: *clay.TextElementConfig) clay.Dimensions {
-    var textSize: clay.Dimensions = .{ .w = 0, .h = 0 };
-
-    const size = text.len;
-
-    var tempByteCounter: u32 = 0; // Used to count longer text line num chars
-    var byteCounter: u32 = 0;
-
-    var textWidth: f32 = 0.0;
-    var tempTextWidth: f32 = 0.0; // Used to count longer text line width
-
-    const font = fonts[ctx.font_id];
-
-    const font_size: f32 = @floatFromInt(ctx.font_size);
-    var textHeight: f32 = font_size;
-    const scaleFactor: f32 = font_size / @as(f32, @floatFromInt(font.baseSize));
-    const line_spacing: f32 = @as(f32, @floatFromInt(ctx.line_height)) - textHeight;
-
-    var letter: i32 = 0;
-    var index: u32 = 0;
-
-    var i: i32 = 0;
-    while (i < size) {
-        byteCounter += 1;
-
-        var codepointByteCount: i32 = 0;
-        letter = rl.getCodepointNext(@ptrCast(&text[@abs(i)]), &codepointByteCount);
-        index = @intCast(rl.getGlyphIndex(font, letter));
-
-        i += codepointByteCount;
-
-        if (letter != '\n') {
-            if (font.glyphs[index].advanceX > 0) {
-                textWidth += @floatFromInt(font.glyphs[index].advanceX);
-            } else {
-                textWidth += font.recs[index].width + @as(f32, @floatFromInt(font.glyphs[index].offsetX));
-            }
-        } else {
-            tempTextWidth = @max(tempTextWidth, textWidth);
-            byteCounter = 0;
-            textWidth = 0;
-
-            // NOTE(raylib): Line spacing is a global variable, use SetTextLineSpacing() to setup
-            textHeight += font_size + line_spacing;
-        }
-
-        if (tempByteCounter < byteCounter) tempByteCounter = byteCounter;
-    }
-
-    if (tempTextWidth < textWidth) tempTextWidth = textWidth;
-
-    textSize.w = tempTextWidth * scaleFactor + @as(f32, @floatFromInt((tempByteCounter - 1) * ctx.letter_spacing));
-    textSize.h = textHeight;
-
-    return textSize;
+fn clay_measure_text(text_value: []const u8, ctx: *clay.TextElementConfig) clay.Dimensions {
+    _ = ctx.font_id;
+    const measured = font_system.measureText(
+        text_value,
+        @floatFromInt(ctx.font_size),
+        @floatFromInt(ctx.letter_spacing),
+    );
+    return .{
+        .w = measured.x,
+        .h = measured.y,
+    };
 }
 
 fn rl_color_to_arr(color: rl.Color) [4]f32 {

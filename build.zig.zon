@@ -32,6 +32,9 @@
         .clay = .{
             .path = "./lib/clay",
         },
+        .@"mach-freetype" = .{
+            .path = "./third_party/mach-freetype",
+        },
     },
     .paths = .{
         "build.zig",

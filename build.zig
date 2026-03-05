@@ -86,6 +86,15 @@ pub fn build(b: *std.Build) void {
         });
         exe_mod.addImport("zclay", zclay_dep.module("zclay"));
     }
+    {
+        const freetype_dep = b.dependency("mach-freetype", .{
+            .target = target,
+            .optimize = optimize,
+            .enable_brotli = false,
+        });
+        exe_mod.addImport("freetype", freetype_dep.module("mach-freetype"));
+        exe_mod.addImport("harfbuzz", freetype_dep.module("mach-harfbuzz"));
+    }
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
