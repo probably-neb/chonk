@@ -47,8 +47,8 @@ const Page = union(enum) {
         fs_store: lib.FS_Store = undefined,
         entry_cur: *lib.FS_Store.Entry = undefined,
         nav_stack: std.ArrayList(*lib.FS_Store.Entry) = .empty,
-        scroll_state: rl.Vector2 = undefined,
-        scroll_view: rl.Rectangle = undefined,
+        scroll_state: rl.Vector2 = .{ .x = 0, .y = 0 },
+        dir_entries_scroll_id: clay.ElementId = undefined,
         cancelled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
         worker_thread: ?std.Thread = null,
         dbg: struct {
@@ -128,6 +128,8 @@ pub fn main() anyerror!void {
                     page_current.viewer.entry_cur = page_current.viewer.fs_store.root_entry_ptr;
                     page_current.viewer.nav_stack = .empty;
                     page_current.viewer.nav_stack.append(alloc_state, page_current.viewer.fs_store.root_entry_ptr) catch unreachable;
+                    page_current.viewer.scroll_state = .{ .x = 0, .y = 0 };
+                    page_current.viewer.dir_entries_scroll_id = clay.ID("Viewer_Dir_Entries_Scroll");
                     page_current.viewer.worker_thread = Thread.spawn(.{}, lib.index_paths_starting_with, .{
                         page_current.viewer.path,
                         alloc_state,
@@ -380,6 +382,16 @@ fn draw() !void {
         }
     }
 
+    if (page_current == .viewer) {
+        const scroll_data = clay.getScrollContainerData(page_current.viewer.dir_entries_scroll_id);
+        if (scroll_data.found) {
+            page_current.viewer.scroll_state = .{
+                .x = scroll_data.scroll_position.x,
+                .y = scroll_data.scroll_position.y,
+            };
+        }
+    }
+
     const show_dbg_info = true;
     if (show_dbg_info) dbg: {
         const frame_rate = rl.getFPS();
@@ -551,6 +563,9 @@ fn render_viewer(viewer_data: *Page.ViewerData) !void {
 
 fn render_dir_entries(viewer_data: *Page.ViewerData, dir_entries: []DirEntry) void {
     const orientation: clay.LayoutDirection = if (win_dims.w > win_dims.h) .LEFT_TO_RIGHT else .TOP_TO_BOTTOM;
+    const dir_entry_row_height: f32 = 56;
+    const dir_entry_overscan_rows: usize = 4;
+
     clay.UI(&.{
         .layout(.{
             .direction = orientation,
@@ -567,7 +582,25 @@ fn render_dir_entries(viewer_data: *Page.ViewerData, dir_entries: []DirEntry) vo
             .TOP_TO_BOTTOM => clay.Sizing{ .w = clay.SizingAxis.grow, .h = clay.SizingAxis.percent(0.5) },
             .LEFT_TO_RIGHT => clay.Sizing{ .w = clay.SizingAxis.percent(0.5), .h = clay.SizingAxis.grow },
         };
+
+        const list_height = switch (orientation) {
+            .TOP_TO_BOTTOM => (win_dims.h - 64.0 - 48.0) * 0.5,
+            .LEFT_TO_RIGHT => win_dims.h - 64.0,
+        };
+        const viewport_height = @max(0.0, list_height - 32.0);
+        const scroll_offset_y = @max(0.0, viewer_data.scroll_state.y);
+
+        const total_rows = dir_entries.len;
+        const visible_rows = if (viewport_height > 0) @as(usize, @intFromFloat(@ceil(viewport_height / dir_entry_row_height))) else total_rows;
+        const first_visible_row = if (dir_entry_row_height > 0) @as(usize, @intFromFloat(@floor(scroll_offset_y / dir_entry_row_height))) else 0;
+        const start_index = first_visible_row -| dir_entry_overscan_rows;
+        const end_index = @min(total_rows, first_visible_row + visible_rows + dir_entry_overscan_rows);
+
+        const top_spacer_height = @as(f32, @floatFromInt(start_index)) * dir_entry_row_height;
+        const bottom_spacer_height = @as(f32, @floatFromInt(total_rows - end_index)) * dir_entry_row_height;
+
         clay.UI(&.{
+            .{ .id = viewer_data.dir_entries_scroll_id },
             .layout(.{
                 .sizing = child_sizing,
                 .direction = .TOP_TO_BOTTOM,
@@ -589,10 +622,19 @@ fn render_dir_entries(viewer_data: *Page.ViewerData, dir_entries: []DirEntry) vo
                 .vertical = true,
             }),
         })({
-            for (dir_entries, 0..) |entry, index| {
+            if (top_spacer_height > 0) {
+                clay.UI(&.{.layout(.{ .sizing = .{ .h = .fixed(top_spacer_height), .w = .grow } })})({});
+            }
+
+            for (dir_entries[start_index..end_index], start_index..) |entry, index| {
                 render_dir_entry(viewer_data, entry, index);
             }
+
+            if (bottom_spacer_height > 0) {
+                clay.UI(&.{.layout(.{ .sizing = .{ .h = .fixed(bottom_spacer_height), .w = .grow } })})({});
+            }
         });
+
         const dir_entries_data = frame_arena_alloc.create(ClayCustom) catch {
             std.debug.print("ERROR: failed to allocate ClayCustom in frame arena\n", .{});
             return;
@@ -621,7 +663,7 @@ fn render_dir_entry(viewer_data: *Page.ViewerData, entry: DirEntry, index: usize
             .padding = clay.Padding.all(8),
             .direction = .LEFT_TO_RIGHT,
             .child_alignment = .{ .y = .CENTER },
-            .sizing = .{ .w = clay.SizingAxis.grow },
+            .sizing = .{ .w = clay.SizingAxis.grow, .h = clay.SizingAxis.fixed(56) },
         }),
     })({
         clay.text(entry.name, .text(.{

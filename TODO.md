@@ -1,4 +1,4 @@
-- [ ] virtualized scrolling for dir entries
+- [x] virtualized scrolling for dir entries
 - [ ] hover names for squarified treemap boxes
 - [ ] improve fs indexing (https://www.perplexity.ai/search/how-can-i-parallelize-file-sys-kQndJ9jQQpeRv7Vx.HFYyg)
 - [ ] inotifywait for real-time fs changes + re-indexing
