@@ -166,8 +166,8 @@ pub fn main() anyerror!void {
 
         const scroll_delta = rl.getMouseWheelMoveV();
         clay.updateScrollContainers(true, .{
-            .x = scroll_delta.x,
-            .y = scroll_delta.y,
+            .x = scroll_delta.x * 4,
+            .y = scroll_delta.y * 4,
         }, rl.getFrameTime());
 
         rl.clearBackground(rl.Color.white);
