@@ -36,7 +36,6 @@ const Page = union(enum) {
         fs_store: lib.FS_Store = undefined,
         entry_cur: *lib.FS_Store.Entry = undefined,
         nav_stack: std.ArrayList(*lib.FS_Store.Entry) = .empty,
-        dir_entries_scroll_id: clay.ElementId = undefined,
         cancelled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
         worker_thread: ?std.Thread = null,
         dbg: struct {
@@ -76,7 +75,7 @@ pub fn main() anyerror!void {
     const clay_arena: clay.Arena = clay.createArenaWithCapacityAndMemory(clay_memory);
     _ = clay.initialize(clay_arena, .{ .h = screenHeight, .w = screenWidth }, .{});
 
-    clay.setMeasureTextFunction(clay_measure_text);
+    clay.setMeasureTextFunction(void, {}, clay_measure_text);
 
     // Main loop
     while (!rl.windowShouldClose()) { // Detect window close button or ESC key
@@ -116,7 +115,6 @@ pub fn main() anyerror!void {
                     page_current.viewer.entry_cur = page_current.viewer.fs_store.root_entry_ptr;
                     page_current.viewer.nav_stack = .empty;
                     page_current.viewer.nav_stack.append(alloc_state, page_current.viewer.fs_store.root_entry_ptr) catch unreachable;
-                    page_current.viewer.dir_entries_scroll_id = clay.ID("Viewer_Dir_Entries_Scroll");
                     page_current.viewer.worker_thread = Thread.spawn(.{}, lib.index_paths_starting_with, .{
                         page_current.viewer.path,
                         alloc_state,
@@ -177,11 +175,9 @@ pub fn main() anyerror!void {
 }
 
 fn draw() !void {
-    var ui_draw_commands: clay.ClayArray(clay.RenderCommand) = clay.endLayout();
+    const ui_draw_commands = clay.endLayout();
 
-    for (0..ui_draw_commands.length) |i| {
-        const render_command = clay.renderCommandArrayGet(&ui_draw_commands, @intCast(i));
-        const render_text = render_command.text.chars[0..@abs(render_command.text.length)];
+    for (ui_draw_commands) |render_command| {
         const bounding_box = render_command.bounding_box;
         const rec: rl.Rectangle = .{
             .x = bounding_box.x,
@@ -192,73 +188,74 @@ fn draw() !void {
         switch (render_command.command_type) {
             .none => {},
             .text => {
-                const config = render_command.config.text_config;
+                const config = render_command.render_data.text;
+                const render_text = config.string_contents.chars[0..@abs(config.string_contents.length)];
 
                 font_system.drawText(
                     render_text,
                     .{ .x = bounding_box.x, .y = bounding_box.y },
                     @floatFromInt(config.font_size),
                     @floatFromInt(config.letter_spacing),
-                    rl_color_from_arr(config.color),
+                    rl_color_from_arr(config.text_color),
                 );
             },
             .rectangle => {
-                const config = render_command.config.rectangle_config;
+                const config = render_command.render_data.rectangle;
                 if (config.corner_radius.top_left > 0) {
                     const radius = (config.corner_radius.top_left * 2) / @max(bounding_box.width, bounding_box.height);
                     rl.drawRectangleRounded(
                         rec,
                         radius,
                         8,
-                        rl_color_from_arr(config.color),
+                        rl_color_from_arr(config.background_color),
                     );
                 } else {
                     rl.drawRectangleRec(
                         rec,
-                        rl_color_from_arr(config.color),
+                        rl_color_from_arr(config.background_color),
                     );
                 }
             },
             .border => {
-                const config = render_command.config.border_config;
+                const config = render_command.render_data.border;
                 // Left border
-                if (config.left.width > 0) {
+                if (config.width.left > 0) {
                     rl.drawRectangle(
                         @intFromFloat(@round(bounding_box.x)),
                         @intFromFloat(@round(bounding_box.y + config.corner_radius.top_left)),
-                        @intCast(config.left.width),
+                        @intCast(config.width.left),
                         @intFromFloat(@round(bounding_box.height - config.corner_radius.top_left - config.corner_radius.bottom_left)),
-                        rl_color_from_arr(config.left.color),
+                        rl_color_from_arr(config.color),
                     );
                 }
                 // Right border
-                if (config.right.width > 0) {
+                if (config.width.right > 0) {
                     rl.drawRectangle(
-                        @intFromFloat(@round(bounding_box.x + bounding_box.width - @as(f32, @floatFromInt(config.right.width)))),
+                        @intFromFloat(@round(bounding_box.x + bounding_box.width - @as(f32, @floatFromInt(config.width.right)))),
                         @intFromFloat(@round(bounding_box.y + config.corner_radius.top_right)),
-                        @intCast(config.right.width),
+                        @intCast(config.width.right),
                         @intFromFloat(@round(bounding_box.height - config.corner_radius.top_right - config.corner_radius.bottom_right)),
-                        rl_color_from_arr(config.right.color),
+                        rl_color_from_arr(config.color),
                     );
                 }
                 // Top border
-                if (config.top.width > 0) {
+                if (config.width.top > 0) {
                     rl.drawRectangle(
                         @intFromFloat(@round(bounding_box.x + config.corner_radius.top_left)),
                         @intFromFloat(@round(bounding_box.y)),
                         @intFromFloat(@round(bounding_box.width - config.corner_radius.top_left - config.corner_radius.top_right)),
-                        @intCast(config.top.width),
-                        rl_color_from_arr(config.top.color),
+                        @intCast(config.width.top),
+                        rl_color_from_arr(config.color),
                     );
                 }
                 // Bottom border
-                if (config.bottom.width > 0) {
+                if (config.width.bottom > 0) {
                     rl.drawRectangle(
                         @intFromFloat(@round(bounding_box.x + config.corner_radius.bottom_left)),
-                        @intFromFloat(@round(bounding_box.y + bounding_box.height - @as(f32, @floatFromInt(config.bottom.width)))),
+                        @intFromFloat(@round(bounding_box.y + bounding_box.height - @as(f32, @floatFromInt(config.width.bottom)))),
                         @intFromFloat(@round(bounding_box.width - config.corner_radius.bottom_left - config.corner_radius.bottom_right)),
-                        @intCast(config.bottom.width),
-                        rl_color_from_arr(config.bottom.color),
+                        @intCast(config.width.bottom),
+                        rl_color_from_arr(config.color),
                     );
                 }
                 // Corner rings
@@ -268,12 +265,12 @@ fn draw() !void {
                             .x = @round(bounding_box.x + config.corner_radius.top_left),
                             .y = @round(bounding_box.y + config.corner_radius.top_left),
                         },
-                        @round(config.corner_radius.top_left - @as(f32, @floatFromInt(config.top.width))),
+                        @round(config.corner_radius.top_left - @as(f32, @floatFromInt(config.width.top))),
                         config.corner_radius.top_left,
                         180,
                         270,
                         10,
-                        rl_color_from_arr(config.top.color),
+                        rl_color_from_arr(config.color),
                     );
                 }
                 if (config.corner_radius.top_right > 0) {
@@ -282,12 +279,12 @@ fn draw() !void {
                             .x = @round(bounding_box.x + bounding_box.width - config.corner_radius.top_right),
                             .y = @round(bounding_box.y + config.corner_radius.top_right),
                         },
-                        @round(config.corner_radius.top_right - @as(f32, @floatFromInt(config.top.width))),
+                        @round(config.corner_radius.top_right - @as(f32, @floatFromInt(config.width.top))),
                         config.corner_radius.top_right,
                         270,
                         360,
                         10,
-                        rl_color_from_arr(config.top.color),
+                        rl_color_from_arr(config.color),
                     );
                 }
                 if (config.corner_radius.bottom_left > 0) {
@@ -296,12 +293,12 @@ fn draw() !void {
                             .x = @round(bounding_box.x + config.corner_radius.bottom_left),
                             .y = @round(bounding_box.y + bounding_box.height - config.corner_radius.bottom_left),
                         },
-                        @round(config.corner_radius.bottom_left - @as(f32, @floatFromInt(config.top.width))),
+                        @round(config.corner_radius.bottom_left - @as(f32, @floatFromInt(config.width.top))),
                         config.corner_radius.bottom_left,
                         90,
                         180,
                         10,
-                        rl_color_from_arr(config.bottom.color),
+                        rl_color_from_arr(config.color),
                     );
                 }
                 if (config.corner_radius.bottom_right > 0) {
@@ -310,12 +307,12 @@ fn draw() !void {
                             .x = @round(bounding_box.x + bounding_box.width - config.corner_radius.bottom_right),
                             .y = @round(bounding_box.y + bounding_box.height - config.corner_radius.bottom_right),
                         },
-                        @round(config.corner_radius.bottom_right - @as(f32, @floatFromInt(config.bottom.width))),
+                        @round(config.corner_radius.bottom_right - @as(f32, @floatFromInt(config.width.bottom))),
                         config.corner_radius.bottom_right,
                         0.1,
                         90,
                         10,
-                        rl_color_from_arr(config.bottom.color),
+                        rl_color_from_arr(config.color),
                     );
                 }
             },
@@ -332,7 +329,7 @@ fn draw() !void {
             },
             .image => unreachable,
             .custom => {
-                const config = render_command.config.custom_config;
+                const config = render_command.render_data.custom;
                 const data: *ClayCustom = @ptrCast(@alignCast(config.custom_data));
                 switch (data.*) {
                     .none => {},
@@ -370,11 +367,11 @@ fn draw() !void {
 
         rgui.setStyle(.default, .{ .default = .text_size }, debug_text_size);
 
-        const dbg_text = std.fmt.allocPrintSentinel(frame_arena_alloc, "FPS={: >4} | FT={: >4}ms | IDX={: >5}/s | FILES={}", .{
+        const dbg_text = std.fmt.allocPrintSentinel(frame_arena_alloc, "FPS={: >4} | FT={: >4}ms | FILES={} | IDX={: >5}/s", .{
             frame_rate,
             round_to_decimal_places(frame_time / std.time.ms_per_s, 5),
-            round_to_decimal_places(files_per_second, 5),
             files_total,
+            round_to_decimal_places(files_per_second, 5),
         }, 0) catch {
             break :dbg;
         };
@@ -389,38 +386,39 @@ fn render_select(select_data: *Page.SelectData) !void {
         std.debug.print("ERROR: Failed to retrieve file paths: {any}\n", .{err});
         break :err &.{};
     };
-    clay.UI(&.{
-        .ID("Page_Select"),
-        .layout(.{
-            .direction = .TOP_TO_BOTTOM,
+    clay.UI()(.{
+        .id = .ID("Page_Select"),
+        .layout = .{
+            .direction = .top_to_bottom,
             .sizing = .{ .h = clay.SizingAxis.grow, .w = clay.SizingAxis.grow },
-            .child_alignment = .{ .x = .CENTER, .y = .TOP },
+            .child_alignment = .{ .x = .center, .y = .top },
             .child_gap = 32,
-        }),
+        },
     })({
-        clay.UI(&.{
-            .ID("Select_Title"), .layout(.{
+        clay.UI()(.{
+            .id = .ID("Select_Title"),
+            .layout = .{
                 .padding = .all(16),
                 .sizing = .{ .w = .fit, .h = .fit },
-            }),
+            },
         })({
-            clay.text("Select Path or Drive to View", .text(.{
+            clay.text("Select Path or Drive to View", .{
                 .font_size = 48,
                 .letter_spacing = 4,
-            }));
+            });
         });
-        clay.UI(&.{
-            .ID("Select_Paths"),
-            .layout(.{
-                .direction = .TOP_TO_BOTTOM,
-                .child_alignment = .{ .x = .LEFT, .y = .TOP },
+        clay.UI()(.{
+            .id = clay.ElementId.ID("Select_Paths"),
+            .layout = .{
+                .direction = .top_to_bottom,
+                .child_alignment = .{ .x = .left, .y = .top },
                 .sizing = .{
                     .w = clay.SizingAxis.percent(0.6),
                     .h = clay.SizingAxis.fit,
                 },
                 .padding = clay.Padding.all(8),
                 .child_gap = 16,
-            }),
+            },
         })({
             for (select_data.paths.?, 0..) |path, index| {
                 render_select_entry(path, index);
@@ -430,50 +428,49 @@ fn render_select(select_data: *Page.SelectData) !void {
 }
 
 fn render_select_entry(path: lib.TopLevelPath, index: usize) void {
-    clay.UI(&.{
-        .IDI("TopLevelPath", @intCast(index)),
-        .layout(.{
-            .direction = .LEFT_TO_RIGHT,
+    const top_level_path_id = clay.ElementId.IDI("TopLevelPath", @intCast(index));
+    clay.UI()(.{
+        .id = top_level_path_id,
+        .layout = .{
+            .direction = .left_to_right,
             .padding = clay.Padding.all(16),
             .sizing = .{
                 .w = clay.SizingAxis.grow,
                 .h = clay.SizingAxis.grow,
             },
-        }),
-        .border(clay_border_all(
+        },
+        .border = clay_border_all(
             rl_color_to_arr(rl.Color.light_gray.brightness(0.25)),
             3,
             3.0,
-        )),
-        if (is_hovered(clay.IDI("TopLevelPath", @intCast(index)))) .rectangle(.{
-            .color = rl_color_to_arr(rl.Color.gray.brightness(0.8)),
-        }) else ClayCustom.noneConfig(),
+        ),
+        .background_color = if (is_hovered(top_level_path_id)) rl_color_to_arr(rl.Color.gray.brightness(0.8)) else .{ 0, 0, 0, 0 },
     })({
-        if (is_clicked(clay.IDI("TopLevelPath", @intCast(index)))) {
+        if (is_clicked(top_level_path_id)) {
             std.debug.print("Clicked: {s}\n", .{path.path});
             page_next = Page.create_viewer(alloc_state.dupeZ(u8, path.path) catch unreachable);
         }
-        clay.UI(&.{
-            .layout(.{
-                .direction = .TOP_TO_BOTTOM,
+        clay.UI()(.{
+            .layout = .{
+                .direction = .top_to_bottom,
                 .child_gap = 8,
                 .child_alignment = .{
-                    .x = .LEFT,
-                    .y = .CENTER,
+                    .x = .left,
+                    .y = .center,
                 },
-            }),
+            },
         })({
-            clay.text(path.path, .text(.{
+            clay.text(path.path, .{
                 .color = rl_color_to_arr(rl.Color.black),
                 .letter_spacing = 2,
                 .font_size = 32,
-            }));
+            });
             if (path.device) |device| {
-                clay.text(device, .text(.{
+                clay.text(device, .{
                     .color = rl_color_to_arr(rl.Color.black.brightness(0.5)),
                     .letter_spacing = 2,
                     .font_size = 24,
-                }));
+                });
             }
         });
     });
@@ -503,16 +500,16 @@ fn render_viewer(viewer_data: *Page.ViewerData) !void {
         break :blk dir_entries;
     };
 
-    const page_select_id = clay.Config.ID("Page_Select");
-    clay.UI(&.{
-        page_select_id,
-        .layout(.{
-            .direction = .TOP_TO_BOTTOM,
+    const page_select_id = clay.ElementId.ID("Page_Select");
+    clay.UI()(.{
+        .id = page_select_id,
+        .layout = .{
+            .direction = .top_to_bottom,
             .sizing = .{ .h = clay.SizingAxis.grow, .w = clay.SizingAxis.grow },
-            .child_alignment = .{ .x = .CENTER, .y = .TOP },
+            .child_alignment = .{ .x = .center, .y = .top },
             .child_gap = 32,
             .padding = clay.Padding.all(16),
-        }),
+        },
     })({
         render_top_bar(viewer_data);
         render_dir_entries(viewer_data, dir_entries);
@@ -520,74 +517,70 @@ fn render_viewer(viewer_data: *Page.ViewerData) !void {
 }
 
 fn render_dir_entries(viewer_data: *Page.ViewerData, dir_entries: []DirEntry) void {
-    const orientation: clay.LayoutDirection = if (win_dims.w > win_dims.h) .LEFT_TO_RIGHT else .TOP_TO_BOTTOM;
+    const orientation: clay.LayoutDirection = if (win_dims.w > win_dims.h) .left_to_right else .top_to_bottom;
     const dir_entry_row_height: f32 = 56;
     const dir_entry_overscan_rows: usize = 4;
 
-    clay.UI(&.{
-        .layout(.{
+    clay.UI()(.{
+        .layout = .{
             .direction = orientation,
             .child_gap = 48,
             .child_alignment = .{
-                .x = .CENTER,
-                .y = .CENTER,
+                .x = .center,
+                .y = .center,
             },
             .sizing = .{ .w = clay.SizingAxis.grow, .h = clay.SizingAxis.grow },
             .padding = clay.Padding.all(32),
-        }),
+        },
     })({
-        var scroll_data = clay.getScrollContainerData(page_current.viewer.dir_entries_scroll_id);
+        const scroll_container_id: clay.ElementId = .ID("Viewer_Dir_Entries_Scroll");
+        var scroll_data = clay.getScrollContainerData(scroll_container_id);
         if (!scroll_data.found) {
             var zero = clay.Vector2{ .x = 0, .y = 0 };
             scroll_data.scroll_position = &zero;
         }
 
         const child_sizing = switch (orientation) {
-            .TOP_TO_BOTTOM => clay.Sizing{ .w = clay.SizingAxis.grow, .h = clay.SizingAxis.percent(0.5) },
-            .LEFT_TO_RIGHT => clay.Sizing{ .w = clay.SizingAxis.percent(0.5), .h = clay.SizingAxis.grow },
+            .top_to_bottom => clay.Sizing{ .w = clay.SizingAxis.grow, .h = clay.SizingAxis.percent(0.5) },
+            .left_to_right => clay.Sizing{ .w = clay.SizingAxis.percent(0.5), .h = clay.SizingAxis.grow },
         };
 
         const list_height = if (scroll_data.found) scroll_data.content_dimensions.h else switch (orientation) {
-            .TOP_TO_BOTTOM => (win_dims.h - 64.0 - 48.0) * 0.5,
-            .LEFT_TO_RIGHT => win_dims.h - 64.0,
+            .top_to_bottom => (win_dims.h - 64.0 - 48.0) * 0.5,
+            .left_to_right => win_dims.h - 64.0,
         };
         const viewport_height = if (scroll_data.found) scroll_data.scroll_container_dimensions.h else @max(0.0, list_height - 32.0);
-        const scroll_offset_y = @max(0.0, scroll_data.scroll_position.y);
+        const scroll_offset_y = @max(0.0, -scroll_data.scroll_position.y);
 
         const total_rows = dir_entries.len;
         const visible_rows = if (viewport_height > 0) @as(usize, @intFromFloat(@ceil(viewport_height / dir_entry_row_height))) else total_rows;
-        const first_visible_row = if (dir_entry_row_height > 0) @as(usize, @intFromFloat(@floor(scroll_offset_y / dir_entry_row_height))) else 0;
+        const first_visible_row: usize = @intFromFloat(@floor(scroll_offset_y / dir_entry_row_height));
         const start_index = first_visible_row -| dir_entry_overscan_rows;
         const end_index = @min(total_rows, first_visible_row + visible_rows + dir_entry_overscan_rows);
 
         const top_spacer_height = @as(f32, @floatFromInt(start_index)) * dir_entry_row_height;
         const bottom_spacer_height = @as(f32, @floatFromInt(total_rows - end_index)) * dir_entry_row_height;
 
-        clay.UI(&.{
-            .{ .id = viewer_data.dir_entries_scroll_id },
-            .layout(.{
+        clay.UI()(.{
+            .id = scroll_container_id,
+            .layout = .{
                 .sizing = child_sizing,
-                .direction = .TOP_TO_BOTTOM,
-                .padding = .{
-                    .x = 8,
-                    .y = 16,
-                },
-            }),
-            .border(border: {
+                .direction = .top_to_bottom,
+                .padding = clay.Padding.axes(16, 8),
+            },
+            .border = border: {
                 const color = rl_color_to_arr(rl.Color.gray.brightness(0.8));
                 var config = clay_border_all(color, 4, 8);
-                config.between_children = .{
-                    .width = 3,
-                    .color = color,
-                };
+                config.width.between_children = 3;
                 break :border config;
-            }),
-            .scroll(.{
+            },
+            .clip = .{
                 .vertical = true,
-            }),
+                .child_offset = scroll_data.scroll_position.*,
+            },
         })({
             if (top_spacer_height > 0) {
-                clay.UI(&.{.layout(.{ .sizing = .{ .h = .fixed(top_spacer_height), .w = .grow } })})({});
+                clay.UI()(.{ .layout = .{ .sizing = .{ .h = .fixed(top_spacer_height), .w = .grow } } })({});
             }
 
             for (dir_entries[start_index..end_index], start_index..) |entry, index| {
@@ -595,7 +588,7 @@ fn render_dir_entries(viewer_data: *Page.ViewerData, dir_entries: []DirEntry) vo
             }
 
             if (bottom_spacer_height > 0) {
-                clay.UI(&.{.layout(.{ .sizing = .{ .h = .fixed(bottom_spacer_height), .w = .grow } })})({});
+                clay.UI()(.{ .layout = .{ .sizing = .{ .h = .fixed(bottom_spacer_height), .w = .grow } } })({});
             }
         });
 
@@ -606,102 +599,96 @@ fn render_dir_entries(viewer_data: *Page.ViewerData, dir_entries: []DirEntry) vo
         dir_entries_data.* = .{ .squarified_treemap = .{
             .dir_entries = dir_entries,
         } };
-        clay.UI(&.{
-            .layout(.{
+        clay.UI()(.{
+            .layout = .{
                 .sizing = child_sizing,
-            }),
-            .rectangle(.{
-                .color = rl_color_to_arr(rl.Color.gray.brightness(0.5)),
-            }),
-            .custom(.{
+            },
+            .background_color = rl_color_to_arr(rl.Color.gray.brightness(0.5)),
+            .custom = .{
                 .custom_data = @ptrCast(@constCast(dir_entries_data)),
-            }),
+            },
         })({});
     });
 }
 
 fn render_dir_entry(viewer_data: *Page.ViewerData, entry: DirEntry, index: usize) void {
-    clay.UI(&.{
-        .IDI("DirEntry", @intCast(index)),
-        .layout(.{
+    clay.UI()(.{
+        .id = clay.ElementId.IDI("DirEntry", @intCast(index)),
+        .layout = .{
             .padding = clay.Padding.all(8),
-            .direction = .LEFT_TO_RIGHT,
-            .child_alignment = .{ .y = .CENTER },
+            .direction = .left_to_right,
+            .child_alignment = .{ .y = .center },
             .sizing = .{ .w = clay.SizingAxis.grow, .h = clay.SizingAxis.fixed(56) },
-        }),
+        },
     })({
-        clay.text(entry.name, .text(.{
+        clay.text(entry.name, .{
             .font_size = 24,
             .letter_spacing = 4,
-        }));
+        });
 
-        clay.UI(&.{
-            .layout(.{
+        clay.UI()(.{
+            .layout = .{
                 .sizing = .{ .w = clay.SizingAxis.grow },
-            }),
+            },
         })({});
 
         const size_str = fmt_file_size(frame_arena_alloc, entry.size_bytes);
-        clay.text(size_str, .text(.{ .letter_spacing = 4, .wrap_mode = .none }));
-        clay.UI(&.{.layout(.{ .sizing = .{ .w = .fixed(20) } })})({});
+        clay.text(size_str, .{ .letter_spacing = 4, .wrap_mode = .none });
+        clay.UI()(.{ .layout = .{ .sizing = .{ .w = .fixed(20) } } })({});
 
-        const nav_button_id = clay.Config.IDI("Dir_Entry_Nav_Button", @intCast(index));
+        const nav_button_id = clay.ElementId.IDI("Dir_Entry_Nav_Button", @intCast(index));
 
-        clay.UI(&.{
-            nav_button_id,
-            .layout(.{
+        clay.UI()(.{
+            .id = nav_button_id,
+            .layout = .{
                 .sizing = .{ .w = .percent(0.10), .h = .grow },
-                .child_alignment = .{ .x = .CENTER },
-                .padding = .{ .x = 8, .y = 4 },
-            }),
-            .rectangle(.{
-                .color = rl_color_to_arr(rl.Color.sky_blue),
-                .corner_radius = clay.CornerRadius.all(4),
-            }),
+                .child_alignment = .{ .x = .center },
+                .padding = clay.Padding.axes(4, 8),
+            },
+            .background_color = rl_color_to_arr(rl.Color.sky_blue),
+            .corner_radius = clay.CornerRadius.all(4),
         })({
-            if (is_clicked(nav_button_id.id)) {
+            if (is_clicked(nav_button_id)) {
                 entry_next = entry.fs_store_entry_ptr;
                 viewer_data.nav_stack.append(alloc_state, entry.fs_store_entry_ptr) catch |err| {
                     std.debug.print("ERROR: failed to append nav stack entry: {any}\n", .{err});
                 };
             }
-            clay.text("->", .text(.{ .letter_spacing = 4 }));
+            clay.text("->", .{ .letter_spacing = 4 });
         });
     });
 }
 
 fn render_top_bar(viewer_data: *Page.ViewerData) void {
-    clay.UI(&.{
-        .layout(.{
-            .direction = .LEFT_TO_RIGHT,
-            .child_alignment = .{ .x = .LEFT, .y = .CENTER },
+    clay.UI()(.{
+        .layout = .{
+            .direction = .left_to_right,
+            .child_alignment = .{ .x = .left, .y = .center },
             .child_gap = 8,
             .sizing = .{ .w = clay.SizingAxis.grow },
-            .padding = .{ .x = 56, .y = 0 },
-        }),
+            .padding = clay.Padding.axes(0, 56),
+        },
     })({
-        const back_button_id = clay.Config.ID("Viewer_Back_Btn");
-        clay.UI(&.{
-            back_button_id,
-            .layout(.{
+        const back_button_id = clay.ElementId.ID("Viewer_Back_Btn");
+        clay.UI()(.{
+            .id = back_button_id,
+            .layout = .{
                 .sizing = .{ .w = clay.SizingAxis.fixed(36), .h = clay.SizingAxis.fixed(36) },
                 .padding = clay.Padding.all(4),
                 .child_alignment = .{
-                    .x = .CENTER,
-                    .y = .CENTER,
+                    .x = .center,
+                    .y = .center,
                 },
-            }),
-            .rectangle(.{
-                .color = rl_color_to_arr(rl.Color.gray.brightness(if (is_hovered(back_button_id.id)) 0.9 else 0.8)),
-                .corner_radius = clay.CornerRadius.all(1.0),
-            }),
+            },
+            .background_color = rl_color_to_arr(rl.Color.gray.brightness(if (is_hovered(back_button_id)) 0.9 else 0.8)),
+            .corner_radius = clay.CornerRadius.all(1.0),
         })({
-            if (is_hovered(back_button_id.id) and rl.isMouseButtonPressed(.left)) {
+            if (is_hovered(back_button_id) and rl.isMouseButtonPressed(.left)) {
                 page_next = Page.create_select();
             }
-            clay.text("<", .text(.{
+            clay.text("<", .{
                 .font_size = 32,
-            }));
+            });
         });
         render_breadcrumbs(viewer_data);
     });
@@ -711,20 +698,18 @@ fn render_breadcrumbs(viewer_data: *Page.ViewerData) void {
     for (viewer_data.nav_stack.items, 0..) |crumb_entry, crumb_render_idx| {
         const crumb_is_current = crumb_entry == viewer_data.entry_cur;
         const crumb_is_root = crumb_entry == viewer_data.fs_store.root_entry_ptr;
-        const crumb_button_id = clay.Config.IDI("Breadcrumb_Item", @intCast(crumb_render_idx));
+        const crumb_button_id = clay.ElementId.IDI("Breadcrumb_Item", @intCast(crumb_render_idx));
 
-        clay.UI(&.{
-            crumb_button_id,
-            .layout(.{
+        clay.UI()(.{
+            .id = crumb_button_id,
+            .layout = .{
                 .child_gap = 8,
-                .padding = .{ .x = 6, .y = 4 },
-            }),
-            if (is_hovered(crumb_button_id.id) and !crumb_is_current) .rectangle(.{
-                .color = rl_color_to_arr(rl.Color.gray.brightness(0.92)),
-                .corner_radius = clay.CornerRadius.all(3),
-            }) else ClayCustom.noneConfig(),
+                .padding = clay.Padding.axes(4, 6),
+            },
+            .background_color = if (is_hovered(crumb_button_id) and !crumb_is_current) rl_color_to_arr(rl.Color.gray.brightness(0.92)) else .{ 0, 0, 0, 0 },
+            .corner_radius = clay.CornerRadius.all(3),
         })({
-            if (is_hovered(crumb_button_id.id) and rl.isMouseButtonPressed(.left) and !crumb_is_current) {
+            if (is_hovered(crumb_button_id) and rl.isMouseButtonPressed(.left) and !crumb_is_current) {
                 viewer_data.entry_cur = crumb_entry;
                 while (viewer_data.nav_stack.items.len > 0 and viewer_data.nav_stack.items[viewer_data.nav_stack.items.len - 1] != crumb_entry) {
                     _ = viewer_data.nav_stack.pop();
@@ -732,17 +717,17 @@ fn render_breadcrumbs(viewer_data: *Page.ViewerData) void {
             }
             const crumb_name = if (crumb_is_root) viewer_data.path else crumb_entry.name[0..crumb_entry.name_len];
 
-            clay.text(crumb_name, .text(.{
+            clay.text(crumb_name, .{
                 .letter_spacing = 2,
                 .font_size = 26,
                 .color = rl_color_to_arr(rl.Color.black.brightness(if (crumb_is_current) 0.4 else 0.2)),
-            }));
+            });
             if (!std.mem.endsWith(u8, crumb_name, "/")) {
-                clay.text("/", .text(.{
+                clay.text("/", .{
                     .letter_spacing = 2,
                     .font_size = 26,
                     .color = rl_color_to_arr(rl.Color.black.brightness(if (crumb_is_current) 0.4 else 0.2)),
-                }));
+                });
             }
         });
     }
@@ -1120,8 +1105,8 @@ pub fn generate_palette(
     return colors;
 }
 
-fn clay_measure_text(text_value: []const u8, ctx: *clay.TextElementConfig) clay.Dimensions {
-    _ = ctx.font_id;
+fn clay_measure_text(text_value: []const u8, ctx: *clay.TextElementConfig, user_data: void) clay.Dimensions {
+    _ = user_data;
     const measured = font_system.measureText(
         text_value,
         @floatFromInt(ctx.font_size),
@@ -1146,20 +1131,10 @@ fn rl_color_from_arr(arr: [4]f32) rl.Color {
     };
 }
 
-fn clay_border_all(color: clay.Color, width: u16, radius: f32) clay.BorderElementConfig {
-    const data = clay.BorderData{ .color = color, .width = width };
+fn clay_border_all(color: clay.Color, width: u16, _: f32) clay.BorderElementConfig {
     return clay.BorderElementConfig{
-        .left = data,
-        .right = data,
-        .top = data,
-        .bottom = data,
-        .between_children = .{},
-        .corner_radius = .{
-            .top_left = radius,
-            .bottom_left = radius,
-            .top_right = radius,
-            .bottom_right = radius,
-        },
+        .color = color,
+        .width = clay.BorderWidth.outside(width),
     };
 }
 
@@ -1171,7 +1146,7 @@ const ClayCustom = union(enum) {
 
     const NONE: ClayCustom = .{ .none = {} };
 
-    pub fn noneConfig() clay.Config {
-        return .custom(.{ .custom_data = @ptrCast(@constCast(&NONE)) });
+    pub fn noneConfig() clay.ElementDeclaration {
+        return .{ .custom = .{ .custom_data = @ptrCast(@constCast(&NONE)) } };
     }
 };

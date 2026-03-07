@@ -340,7 +340,7 @@ pub const FS_Store = struct {
     const ENTRIES_PER_PAGE = @divExact(PAGE_SIZE, Entry.SIZE);
 
     pub fn init(self: *FS_Store, path: [:0]const u8) !void {
-        const fd = if (@import("builtin").mode == .Debug)
+        const fd = if (true or @import("builtin").mode == .Debug)
             -1 // in memory only
         else {
             unreachable;
