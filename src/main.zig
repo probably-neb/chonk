@@ -768,10 +768,8 @@ const DirEntry = struct {
     fs_store_entry_ptr: *lib.FS_Store.Entry,
 
     fn gt_than(_: void, lhs: DirEntry, rhs: DirEntry) bool {
-        if (lhs.size_bytes == rhs.size_bytes) {
-            return std.mem.lessThan(u8, lhs.name, rhs.name);
-        }
-        return lhs.size_bytes > rhs.size_bytes;
+        return lhs.size_bytes > rhs.size_bytes or
+            (lhs.size_bytes == rhs.size_bytes and std.mem.lessThan(u8, lhs.name, rhs.name));
     }
 };
 
@@ -782,21 +780,21 @@ fn squarify(alloc: Allocator, dir_entries: []const DirEntry, rect: rl.Rectangle)
     // this.scaleWeights(nodes, width, height);
     std.debug.assert(std.sort.isSorted(DirEntry, dir_entries, {}, DirEntry.gt_than));
     const util = struct {
-        fn sum(row: []f32) f32 {
+        fn sum(row: []const f32) f32 {
             var sum_: f32 = 0;
             for (row) |d| {
                 sum_ += d;
             }
             return sum_;
         }
-        fn min(row: []f32) f32 {
+        fn min(row: []const f32) f32 {
             var min_: f32 = std.math.floatMax(f32);
             for (row) |d| {
                 min_ = @min(min_, d);
             }
             return min_;
         }
-        fn max(row: []f32) f32 {
+        fn max(row: []const f32) f32 {
             var max_: f32 = 0;
             for (row) |d| {
                 max_ = @max(max_, d);
@@ -807,7 +805,63 @@ fn squarify(alloc: Allocator, dir_entries: []const DirEntry, rect: rl.Rectangle)
         fn worst(s: f32, min_: f32, max_: f32, w: f32) f32 {
             return @max((w * w * max_) / (s * s), (s * s) / (w * w * min_));
         }
+
+        fn draw_rect(rec: rl.Rectangle, color: rl.Color) void {
+            const border_width: f32 = 3.0;
+            var inset = rec;
+            inset.x += border_width / 2;
+            inset.y += border_width / 2;
+            inset.width -= border_width / 2;
+            inset.height -= border_width / 2;
+            if (inset.width <= 0 or inset.height <= 0) return;
+            rl.drawRectangleRec(inset, color);
+        }
+
+        fn flush_row(
+            vertical: bool,
+            x: *f32,
+            y: *f32,
+            rw: *f32,
+            rh: *f32,
+            row_weights: []const f32,
+            row_colors: []const rl.Color,
+        ) void {
+            if (row_weights.len == 0) return;
+
+            var rx = x.*;
+            var ry = y.*;
+            const s = sum(row_weights);
+            const w = if (vertical) rh.* else rw.*;
+            const z = s / w;
+
+            for (0..row_weights.len) |j| {
+                const d = row_weights[j] / z;
+                const color = row_colors[j];
+                const rec: rl.Rectangle = if (vertical)
+                    .{ .x = rx, .y = ry, .width = z, .height = d }
+                else
+                    .{ .x = rx, .y = ry, .width = d, .height = z };
+
+                if (vertical) {
+                    ry += d;
+                } else {
+                    rx += d;
+                }
+
+                draw_rect(rec, color);
+            }
+
+            if (vertical) {
+                x.* += z;
+                rw.* -= z;
+            } else {
+                y.* += z;
+                rh.* -= z;
+            }
+        }
     };
+
+    const min_aggregate_percent: f32 = 0.0001;
 
     const weights = alloc.alloc(f32, dir_entries.len) catch unreachable;
     {
@@ -823,8 +877,10 @@ fn squarify(alloc: Allocator, dir_entries: []const DirEntry, rect: rl.Rectangle)
     }
     const colors = generate_palette(alloc, weights, .{ .sample = .verdis }) catch unreachable;
 
+    // background
+    rl.drawRectangleRec(rect, .light_gray);
+
     var vertical = rect.height < rect.width;
-    var w = if (vertical) rect.height else rect.width;
     var x = rect.x;
     var y = rect.y;
     var rw = rect.width;
@@ -838,11 +894,22 @@ fn squarify(alloc: Allocator, dir_entries: []const DirEntry, rect: rl.Rectangle)
     while (i < dir_entries.len) {
         const c = dir_entries[i];
         const r: f32 = weights[i];
-        const s = util.sum(row_weights.items);
+        const remaining_percent = r / (rect.width * rect.height);
+
+        if (row.items.len == 0 and remaining_percent < min_aggregate_percent) {
+            util.draw_rect(
+                .{ .x = x, .y = y, .width = rw, .height = rh },
+                colors[i],
+            );
+            return;
+        }
+
+        const row_sum = util.sum(row_weights.items);
         const min = util.min(row_weights.items);
         const max = util.max(row_weights.items);
-        const wit = util.worst(s + r, @min(min, r), @max(max, r), w);
-        const without = util.worst(s, min, max, w);
+        const w = if (vertical) rh else rw;
+        const wit = util.worst(row_sum + r, @min(min, r), @max(max, r), w);
+        const without = util.worst(row_sum, min, max, w);
         if (row.items.len == 0 or wit < without) {
             row.appendAssumeCapacity(c);
             row_weights.appendAssumeCapacity(r);
@@ -850,37 +917,41 @@ fn squarify(alloc: Allocator, dir_entries: []const DirEntry, rect: rl.Rectangle)
             i += 1;
             continue;
         }
-        var rx = x;
-        var ry = y;
-        const z = s / w;
-        for (0..row.items.len) |j| {
-            const d = row_weights.items[j] / z;
-            const color = row_colors.items[j];
-            if (vertical) {
-                const rec: rl.Rectangle = .{ .x = rx, .y = ry, .width = z, .height = d };
-                rl.drawRectangleRec(rec, color);
-                rl.drawRectangleLinesEx(rec, 3, rl.Color.light_gray);
-                ry = ry + d;
-            } else {
-                const rec: rl.Rectangle = .{ .x = rx, .y = ry, .width = d, .height = z };
-                rl.drawRectangleRec(rec, color);
-                rl.drawRectangleLinesEx(rec, 3, rl.Color.light_gray);
-                rx = rx + d;
-            }
-        }
-        if (vertical) {
-            x = x + z;
-            rw = rw - z;
-        } else {
-            y = y + z;
-            rh = rh - z;
-        }
+
+        util.flush_row(
+            vertical,
+            &x,
+            &y,
+            &rw,
+            &rh,
+            row_weights.items,
+            row_colors.items,
+        );
 
         vertical = rh < rw;
-        w = if (vertical) rh else rw;
         row.clearRetainingCapacity();
         row_weights.clearRetainingCapacity();
         row_colors.clearRetainingCapacity();
+    }
+
+    if (row_weights.items.len > 0) {
+        const row_percent = util.sum(row_weights.items) / (rect.width * rect.height);
+        if (row_percent < min_aggregate_percent) {
+            util.draw_rect(
+                .{ .x = x, .y = y, .width = rw, .height = rh },
+                row_colors.items[0],
+            );
+        } else {
+            util.flush_row(
+                vertical,
+                &x,
+                &y,
+                &rw,
+                &rh,
+                row_weights.items,
+                row_colors.items,
+            );
+        }
     }
 }
 
