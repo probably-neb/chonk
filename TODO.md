@@ -1,4 +1,6 @@
 - [x] virtualized scrolling for dir entries
+- [x] Don't render / / when looking at root, and fix spacing of breadcrumbs
+- [ ] Fix many entries slowdown with squarified treemap squares (in /usr/lib)
 - [ ] hover names for squarified treemap boxes
 - [ ] improve fs indexing (https://www.perplexity.ai/search/how-can-i-parallelize-file-sys-kQndJ9jQQpeRv7Vx.HFYyg)
 - [ ] inotifywait for real-time fs changes + re-indexing

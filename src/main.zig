@@ -16,17 +16,6 @@ const frame_arena_alloc: Allocator = frame_arena.allocator();
 
 var font_system: text.FontSystem = undefined;
 
-const TEXT_DEBUG_ENABLE = true;
-const TEXT_DEBUG_MAX_MAP_LOGS: u32 = 64;
-const TEXT_DEBUG_MAX_DRAW_LOGS: u32 = 64;
-
-const TextDebugState = struct {
-    map_logs: u32 = 0,
-    draw_logs: u32 = 0,
-};
-
-var text_debug: TextDebugState = .{};
-
 var page_current: Page = Page.create_select();
 var page_next: ?Page = null;
 var entry_next: ?*lib.FS_Store.Entry = null;
@@ -206,24 +195,6 @@ fn draw() !void {
             .none => {},
             .text => {
                 const config = render_command.config.text_config;
-
-                if (TEXT_DEBUG_ENABLE and text_debug.draw_logs < TEXT_DEBUG_MAX_DRAW_LOGS) {
-                    std.debug.print(
-                        "TEXT_DRAW[{d}] src_text_len={d} dst=({d:.2},{d:.2},{d:.2},{d:.2}) font_id={d} font_size={d} letter_spacing={d}\n",
-                        .{
-                            text_debug.draw_logs,
-                            render_text.len,
-                            bounding_box.x,
-                            bounding_box.y,
-                            bounding_box.width,
-                            bounding_box.height,
-                            config.font_id,
-                            config.font_size,
-                            config.letter_spacing,
-                        },
-                    );
-                    text_debug.draw_logs += 1;
-                }
 
                 font_system.drawText(
                     render_text,
@@ -529,7 +500,6 @@ fn render_viewer(viewer_data: *Page.ViewerData) !void {
         const store = viewer_data.fs_store;
         const entry_cur = viewer_data.entry_cur;
         if (entry_cur.children_count == 0 or @atomicLoad(u8, &entry_cur.lock_this, .acquire) != 0) {
-            std.debug.print("NO ENTRIES YET\n", .{});
             break :blk &[_]DirEntry{};
         }
         const children = store.entries[entry_cur.children_start..][0..entry_cur.children_count];
@@ -773,11 +743,13 @@ fn render_breadcrumbs(viewer_data: *Page.ViewerData) void {
                 .font_size = 26,
                 .color = rl_color_to_arr(rl.Color.black.brightness(if (crumb_is_current) 0.4 else 0.2)),
             }));
-            clay.text("/", .text(.{
-                .letter_spacing = 2,
-                .font_size = 26,
-                .color = rl_color_to_arr(rl.Color.black.brightness(if (crumb_is_current) 0.4 else 0.2)),
-            }));
+            if (!std.mem.endsWith(u8, crumb_name, "/")) {
+                clay.text("/", .text(.{
+                    .letter_spacing = 2,
+                    .font_size = 26,
+                    .color = rl_color_to_arr(rl.Color.black.brightness(if (crumb_is_current) 0.4 else 0.2)),
+                }));
+            }
         });
     }
 }
