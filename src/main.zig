@@ -511,7 +511,7 @@ fn render_viewer(viewer_data: *Page.ViewerData) !void {
                 .fs_store_entry_ptr = child,
             };
         }
-        std.sort.insertion(DirEntry, dir_entries, {}, DirEntry.gt_than);
+        std.sort.heap(DirEntry, dir_entries, {}, DirEntry.gt_than);
         break :blk dir_entries;
     };
 
