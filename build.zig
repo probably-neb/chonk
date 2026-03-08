@@ -1,70 +1,66 @@
 const std = @import("std");
 
-// Although this function looks imperative, note that its job is to
-// declaratively construct a build graph that will be executed by an external
-// runner.
+const Module = struct {
+    name: []const u8,
+    exe_name: ?[]const u8 = null,
+    mod: ?*std.Build.Module = null,
+    exe: ?*std.Build.Step.Compile = null,
+};
+
+const mod_defs = [_]Module{
+    .{ .name = "base" },
+    .{ .name = "text" },
+    .{ .name = "bin", .exe_name = "chonk" },
+};
+
 pub fn build(b: *std.Build) void {
-    // Standard target options allows the person running `zig build` to choose
-    // what target to build for. Here we do not override the defaults, which
-    // means any target is allowed, and the default is native. Other options
-    // for restricting supported target set are available.
     const target = b.standardTargetOptions(.{});
 
-    // Standard optimization options allow the person running `zig build` to select
-    // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
-    // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-    // Base module
-    const mod_base = b.createModule(.{
-        .root_source_file = b.path("src/base/base.zig"),
-        .optimize = optimize,
-        .target = target,
-    });
+    const test_step = b.step("test", "Run all tests");
+    const check_step = b.step("check", "Run all checks");
 
-    const base_lib = b.addLibrary(.{
-        .linkage = .static,
-        .name = "base",
-        .root_module = mod_base,
-    });
-    b.installArtifact(base_lib);
+    var modules: [mod_defs.len]*std.Build.Module = undefined;
+    var exes: [mod_defs.len]?*std.Build.Step.Compile = .{null} ** mod_defs.len;
 
-    const base_tests = b.addTest(.{
-        .root_module = mod_base,
-    });
-    const run_base_tests = b.addRunArtifact(base_tests);
+    for (&mod_defs, 0..) |*mod_def, i| {
+        const mod = b.createModule(.{
+            .root_source_file = b.path(b.fmt("src/{s}/{s}.zig", .{ mod_def.name, mod_def.name })),
+            .target = target,
+            .optimize = optimize,
+        });
+        modules[i] = mod;
+        exes[i] = if (mod_def.exe_name) |name| b.addExecutable(.{
+            .name = name,
+            .root_module = mod,
+        }) else null;
+        const mod_test_step = b.addTest(.{
+            .root_module = mod,
+        });
+        const run_test_cmd = b.addRunArtifact(mod_test_step);
+        test_step.dependOn(&run_test_cmd.step);
+        check_step.dependOn(&run_test_cmd.step);
 
-    const lib_mod = b.createModule(.{
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    lib_mod.addImport("base", mod_base);
+        const test_mod = b.step(b.fmt("test:{s}", .{mod_def.name}), b.fmt("Run tests for {s}", .{mod_def.name}));
+        test_mod.dependOn(&run_test_cmd.step);
 
-    const lib = b.addLibrary(.{
-        .linkage = .static,
-        .name = "chonk",
-        .root_module = lib_mod,
-    });
+        const check_exe = b.addExecutable(.{
+            .name = b.fmt("check-{s}", .{mod_def.name}),
+            .root_module = mod,
+        });
+        check_step.dependOn(&check_exe.step);
+    }
 
-    // This declares intent for the library to be installed into the standard
-    // location when the user invokes the "install" step (the default step when
-    // running `zig build`).
-    b.installArtifact(lib);
+    for (modules, 0..) |mod, i| {
+        for (modules, mod_defs, 0..) |other_mod, other_mod_def, j| {
+            if (i == j) {
+                continue;
+            }
+            mod.addImport(other_mod_def.name, other_mod);
+        }
+    }
 
-    const exe_mod = b.createModule(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    exe_mod.addImport("base", mod_base);
-
-    const exe = b.addExecutable(.{
-        .name = "chonk",
-        .root_module = exe_mod,
-    });
-
-    // raylib
     {
         const raylib_dep = b.dependency("raylib-zig", .{
             .target = target,
@@ -75,16 +71,23 @@ pub fn build(b: *std.Build) void {
         const raygui = raylib_dep.module("raygui"); // raygui module
         const raylib_artifact = raylib_dep.artifact("raylib"); // raylib C library
 
-        exe.linkLibrary(raylib_artifact);
-        exe_mod.addImport("raylib", raylib);
-        exe_mod.addImport("raygui", raygui);
+        for (modules, exes) |mod, exe| {
+            if (exe) |executable| {
+                executable.linkLibrary(raylib_artifact);
+            }
+            mod.addImport("raylib", raylib);
+            mod.addImport("raygui", raygui);
+        }
     }
     {
         const zclay_dep = b.dependency("clay", .{
             .target = target,
             .optimize = optimize,
         });
-        exe_mod.addImport("zclay", zclay_dep.module("zclay"));
+
+        for (modules) |mod| {
+            mod.addImport("zclay", zclay_dep.module("zclay"));
+        }
     }
     {
         const freetype_dep = b.dependency("mach-freetype", .{
@@ -92,57 +95,32 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .enable_brotli = false,
         });
-        exe_mod.addImport("freetype", freetype_dep.module("mach-freetype"));
-        exe_mod.addImport("harfbuzz", freetype_dep.module("mach-harfbuzz"));
+
+        for (modules) |mod| {
+            mod.addImport("freetype", freetype_dep.module("mach-freetype"));
+            mod.addImport("harfbuzz", freetype_dep.module("mach-harfbuzz"));
+        }
+    }
+    for (modules) |mod| {
+        mod.addAnonymousImport("FiraSans-Regular.ttf", .{
+            .root_source_file = b.path("src/assets/fonts/FiraSans-Regular.ttf"),
+        });
     }
 
-    // This declares intent for the executable to be installed into the
-    // standard location when the user invokes the "install" step (the default
-    // step when running `zig build`).
-    b.installArtifact(exe);
+    for (exes) |exe| {
+        if (exe) |executable| {
+            const install_step = b.addInstallArtifact(executable, .{});
+            const run_cmd = b.addRunArtifact(executable);
 
-    // This *creates* a Run step in the build graph, to be executed when another
-    // step is evaluated that depends on it. The next line below will establish
-    // such a dependency.
-    const run_cmd = b.addRunArtifact(exe);
+            run_cmd.step.dependOn(&install_step.step);
+            b.installArtifact(executable);
 
-    // By making the run step depend on the install step, it will be run from the
-    // installation directory rather than directly from within the cache directory.
-    // This is not necessary, however, if the application depends on other installed
-    // files, this ensures they will be present and in the expected location.
-    run_cmd.step.dependOn(b.getInstallStep());
+            if (b.args) |args| {
+                run_cmd.addArgs(args);
+            }
 
-    // This allows the user to pass arguments to the application in the build
-    // command itself, like this: `zig build run -- arg1 arg2 etc`
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
+            const run_step = b.step("run", "Run the app");
+            run_step.dependOn(&run_cmd.step);
+        }
     }
-
-    // This creates a build step. It will be visible in the `zig build --help` menu,
-    // and can be selected like this: `zig build run`
-    // This will evaluate the `run` step rather than the default, which is "install".
-    const run_step = b.step("run", "Run the app");
-    run_step.dependOn(&run_cmd.step);
-
-    // Creates a step for unit testing. This only builds the test executable
-    // but does not run it.
-    const lib_unit_tests = b.addTest(.{
-        .root_module = lib_mod,
-    });
-
-    const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
-
-    const exe_unit_tests = b.addTest(.{
-        .root_module = exe_mod,
-    });
-
-    const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
-
-    // Similar to creating the run step earlier, this exposes a `test` step to
-    // the `zig build --help` menu, providing a way for the user to request
-    // running the unit tests.
-    const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_base_tests.step);
-    test_step.dependOn(&run_lib_unit_tests.step);
-    test_step.dependOn(&run_exe_unit_tests.step);
 }

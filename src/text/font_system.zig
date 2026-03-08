@@ -5,7 +5,7 @@ const harfbuzz = @import("harfbuzz");
 
 const glyph_cache = @import("glyph_cache.zig");
 
-const embedded_font_bytes = @embedFile("../assets/fonts/FiraSans-Regular.ttf");
+const embedded_font_bytes = @embedFile("FiraSans-Regular.ttf");
 
 pub const FontSystem = struct {
     allocator: std.mem.Allocator,

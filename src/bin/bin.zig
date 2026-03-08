@@ -8,7 +8,7 @@ const colormaps = @import("colormaps.zig");
 const rl = @import("raylib");
 const rgui = @import("raygui");
 const clay = @import("zclay");
-const text = @import("text/mod.zig");
+const text = @import("text");
 
 const alloc_state = std.heap.page_allocator;
 var frame_arena = std.heap.ArenaAllocator.init(alloc_state);
