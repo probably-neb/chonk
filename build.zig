@@ -12,6 +12,7 @@ const mod_defs = [_]Module{
     .{ .name = "text" },
     .{ .name = "bin", .exe_name = "chonk" },
     .{ .name = "fs-index" },
+    .{ .name = "ui" },
 };
 
 pub fn build(b: *std.Build) void {

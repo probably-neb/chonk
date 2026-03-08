@@ -6,6 +6,7 @@ const colormaps = @import("colormaps.zig");
 
 const fs_index = @import("fs-index");
 const text = @import("text");
+const ui = @import("ui");
 
 const rl = @import("raylib");
 const rgui = @import("raygui");
@@ -13,9 +14,7 @@ const clay = @import("zclay");
 
 const alloc_state = std.heap.page_allocator;
 var frame_arena = std.heap.ArenaAllocator.init(alloc_state);
-const frame_arena_alloc: Allocator = frame_arena.allocator();
-
-var font_system: text.FontSystem = undefined;
+pub const frame_arena_alloc: Allocator = frame_arena.allocator();
 
 var page_current: Page = Page.create_select();
 var page_next: ?Page = null;
@@ -67,16 +66,14 @@ pub fn main() anyerror!void {
     defer rl.closeWindow();
 
     rl.setTargetFPS(60);
-
-    font_system = try text.FontSystem.init(alloc_state, 32, 2048, 2048);
-    defer font_system.deinit();
+    try text.init(alloc_state);
 
     const clay_min_mem_amount: u32 = clay.minMemorySize();
     const clay_memory = try alloc_state.alloc(u8, clay_min_mem_amount);
     const clay_arena: clay.Arena = clay.createArenaWithCapacityAndMemory(clay_memory);
     _ = clay.initialize(clay_arena, .{ .h = screenHeight, .w = screenWidth }, .{});
 
-    clay.setMeasureTextFunction(void, {}, clay_measure_text);
+    clay.setMeasureTextFunction(void, {}, text.clay_measure_text);
 
     // Main loop
     while (!rl.windowShouldClose()) { // Detect window close button or ESC key
@@ -171,212 +168,37 @@ pub fn main() anyerror!void {
             },
         }
 
-        try draw();
-    }
-}
+        try ui.draw();
 
-fn draw() !void {
-    const ui_draw_commands = clay.endLayout();
+        const show_dbg_info = true;
+        if (show_dbg_info) dbg: {
+            const frame_rate = rl.getFPS();
+            const frame_time = rl.getFrameTime();
 
-    for (ui_draw_commands) |render_command| {
-        const bounding_box = render_command.bounding_box;
-        const rec: rl.Rectangle = .{
-            .x = bounding_box.x,
-            .y = bounding_box.y,
-            .width = bounding_box.width,
-            .height = bounding_box.height,
-        };
-        switch (render_command.command_type) {
-            .none => {},
-            .text => {
-                const config = render_command.render_data.text;
-                const render_text = config.string_contents.chars[0..@abs(config.string_contents.length)];
+            const files_per_second, const files_total = switch (page_current) {
+                .viewer => |*viewer_data| fps: {
+                    const files_per_second = @as(f64, @floatFromInt(viewer_data.dbg.files_indexed -| viewer_data.dbg.files_indexed_prev)) / frame_time;
+                    viewer_data.dbg.files_indexed_prev = viewer_data.dbg.files_indexed;
 
-                font_system.drawText(
-                    render_text,
-                    .{ .x = bounding_box.x, .y = bounding_box.y },
-                    @floatFromInt(config.font_size),
-                    @floatFromInt(config.letter_spacing),
-                    rl_color_from_arr(config.text_color),
-                );
-            },
-            .rectangle => {
-                const config = render_command.render_data.rectangle;
-                if (config.corner_radius.top_left > 0) {
-                    const radius = (config.corner_radius.top_left * 2) / @max(bounding_box.width, bounding_box.height);
-                    rl.drawRectangleRounded(
-                        rec,
-                        radius,
-                        8,
-                        rl_color_from_arr(config.background_color),
-                    );
-                } else {
-                    rl.drawRectangleRec(
-                        rec,
-                        rl_color_from_arr(config.background_color),
-                    );
-                }
-            },
-            .border => {
-                const config = render_command.render_data.border;
-                // Left border
-                if (config.width.left > 0) {
-                    rl.drawRectangle(
-                        @intFromFloat(@round(bounding_box.x)),
-                        @intFromFloat(@round(bounding_box.y + config.corner_radius.top_left)),
-                        @intCast(config.width.left),
-                        @intFromFloat(@round(bounding_box.height - config.corner_radius.top_left - config.corner_radius.bottom_left)),
-                        rl_color_from_arr(config.color),
-                    );
-                }
-                // Right border
-                if (config.width.right > 0) {
-                    rl.drawRectangle(
-                        @intFromFloat(@round(bounding_box.x + bounding_box.width - @as(f32, @floatFromInt(config.width.right)))),
-                        @intFromFloat(@round(bounding_box.y + config.corner_radius.top_right)),
-                        @intCast(config.width.right),
-                        @intFromFloat(@round(bounding_box.height - config.corner_radius.top_right - config.corner_radius.bottom_right)),
-                        rl_color_from_arr(config.color),
-                    );
-                }
-                // Top border
-                if (config.width.top > 0) {
-                    rl.drawRectangle(
-                        @intFromFloat(@round(bounding_box.x + config.corner_radius.top_left)),
-                        @intFromFloat(@round(bounding_box.y)),
-                        @intFromFloat(@round(bounding_box.width - config.corner_radius.top_left - config.corner_radius.top_right)),
-                        @intCast(config.width.top),
-                        rl_color_from_arr(config.color),
-                    );
-                }
-                // Bottom border
-                if (config.width.bottom > 0) {
-                    rl.drawRectangle(
-                        @intFromFloat(@round(bounding_box.x + config.corner_radius.bottom_left)),
-                        @intFromFloat(@round(bounding_box.y + bounding_box.height - @as(f32, @floatFromInt(config.width.bottom)))),
-                        @intFromFloat(@round(bounding_box.width - config.corner_radius.bottom_left - config.corner_radius.bottom_right)),
-                        @intCast(config.width.bottom),
-                        rl_color_from_arr(config.color),
-                    );
-                }
-                // Corner rings
-                if (config.corner_radius.top_left > 0) {
-                    rl.drawRing(
-                        .{
-                            .x = @round(bounding_box.x + config.corner_radius.top_left),
-                            .y = @round(bounding_box.y + config.corner_radius.top_left),
-                        },
-                        @round(config.corner_radius.top_left - @as(f32, @floatFromInt(config.width.top))),
-                        config.corner_radius.top_left,
-                        180,
-                        270,
-                        10,
-                        rl_color_from_arr(config.color),
-                    );
-                }
-                if (config.corner_radius.top_right > 0) {
-                    rl.drawRing(
-                        .{
-                            .x = @round(bounding_box.x + bounding_box.width - config.corner_radius.top_right),
-                            .y = @round(bounding_box.y + config.corner_radius.top_right),
-                        },
-                        @round(config.corner_radius.top_right - @as(f32, @floatFromInt(config.width.top))),
-                        config.corner_radius.top_right,
-                        270,
-                        360,
-                        10,
-                        rl_color_from_arr(config.color),
-                    );
-                }
-                if (config.corner_radius.bottom_left > 0) {
-                    rl.drawRing(
-                        .{
-                            .x = @round(bounding_box.x + config.corner_radius.bottom_left),
-                            .y = @round(bounding_box.y + bounding_box.height - config.corner_radius.bottom_left),
-                        },
-                        @round(config.corner_radius.bottom_left - @as(f32, @floatFromInt(config.width.top))),
-                        config.corner_radius.bottom_left,
-                        90,
-                        180,
-                        10,
-                        rl_color_from_arr(config.color),
-                    );
-                }
-                if (config.corner_radius.bottom_right > 0) {
-                    rl.drawRing(
-                        .{
-                            .x = @round(bounding_box.x + bounding_box.width - config.corner_radius.bottom_right),
-                            .y = @round(bounding_box.y + bounding_box.height - config.corner_radius.bottom_right),
-                        },
-                        @round(config.corner_radius.bottom_right - @as(f32, @floatFromInt(config.width.bottom))),
-                        config.corner_radius.bottom_right,
-                        0.1,
-                        90,
-                        10,
-                        rl_color_from_arr(config.color),
-                    );
-                }
-            },
-            .scissor_start => {
-                rl.beginScissorMode(
-                    @intFromFloat(bounding_box.x),
-                    @intFromFloat(bounding_box.y),
-                    @intFromFloat(bounding_box.width),
-                    @intFromFloat(bounding_box.height),
-                );
-            },
-            .scissor_end => {
-                rl.endScissorMode();
-            },
-            .image => unreachable,
-            .custom => {
-                const config = render_command.render_data.custom;
-                const data: *ClayCustom = @ptrCast(@alignCast(config.custom_data));
-                switch (data.*) {
-                    .none => {},
-                    .squarified_treemap => |treemap_data| {
-                        const dir_entries = treemap_data.dir_entries;
-                        const rect: rl.Rectangle = .{
-                            .x = bounding_box.x,
-                            .y = bounding_box.y,
-                            .width = bounding_box.width,
-                            .height = bounding_box.height,
-                        };
-                        squarify(frame_arena_alloc, dir_entries, rect);
-                    },
-                }
-            },
+                    break :fps .{ files_per_second, viewer_data.dbg.files_indexed };
+                },
+                .select => .{ 0, 0 },
+            };
+
+            const debug_text_size = 32;
+
+            rgui.setStyle(.default, .{ .default = .text_size }, debug_text_size);
+
+            const dbg_text = std.fmt.allocPrintSentinel(frame_arena_alloc, "FPS={: >4} | FT={: >4}ms | FILES={} | IDX={: >5}/s", .{
+                frame_rate,
+                round_to_decimal_places(frame_time / std.time.ms_per_s, 5),
+                files_total,
+                round_to_decimal_places(files_per_second, 5),
+            }, 0) catch {
+                break :dbg;
+            };
+            rl.drawText(dbg_text, 0, rl.getRenderHeight() - debug_text_size - 5, debug_text_size, rl.Color.black);
         }
-    }
-
-    const show_dbg_info = true;
-    if (show_dbg_info) dbg: {
-        const frame_rate = rl.getFPS();
-        const frame_time = rl.getFrameTime();
-
-        const files_per_second, const files_total = switch (page_current) {
-            .viewer => |*viewer_data| fps: {
-                const files_per_second = @as(f64, @floatFromInt(viewer_data.dbg.files_indexed -| viewer_data.dbg.files_indexed_prev)) / frame_time;
-                viewer_data.dbg.files_indexed_prev = viewer_data.dbg.files_indexed;
-
-                break :fps .{ files_per_second, viewer_data.dbg.files_indexed };
-            },
-            .select => .{ 0, 0 },
-        };
-
-        const debug_text_size = 32;
-
-        rgui.setStyle(.default, .{ .default = .text_size }, debug_text_size);
-
-        const dbg_text = std.fmt.allocPrintSentinel(frame_arena_alloc, "FPS={: >4} | FT={: >4}ms | FILES={} | IDX={: >5}/s", .{
-            frame_rate,
-            round_to_decimal_places(frame_time / std.time.ms_per_s, 5),
-            files_total,
-            round_to_decimal_places(files_per_second, 5),
-        }, 0) catch {
-            break :dbg;
-        };
-        rl.drawText(dbg_text, 0, rl.getRenderHeight() - debug_text_size - 5, debug_text_size, rl.Color.black);
     }
 }
 
@@ -441,11 +263,11 @@ fn render_select_entry(path: fs_index.TopLevelPath, index: usize) void {
             },
         },
         .border = clay_border_all(
-            rl_color_to_arr(rl.Color.light_gray.brightness(0.25)),
+            ui.rl_color_to_arr(rl.Color.light_gray.brightness(0.25)),
             3,
             3.0,
         ),
-        .background_color = if (is_hovered(top_level_path_id)) rl_color_to_arr(rl.Color.gray.brightness(0.8)) else .{ 0, 0, 0, 0 },
+        .background_color = if (is_hovered(top_level_path_id)) ui.rl_color_to_arr(rl.Color.gray.brightness(0.8)) else .{ 0, 0, 0, 0 },
     })({
         if (is_clicked(top_level_path_id)) {
             std.debug.print("Clicked: {s}\n", .{path.path});
@@ -462,13 +284,13 @@ fn render_select_entry(path: fs_index.TopLevelPath, index: usize) void {
             },
         })({
             clay.text(path.path, .{
-                .color = rl_color_to_arr(rl.Color.black),
+                .color = ui.rl_color_to_arr(rl.Color.black),
                 .letter_spacing = 2,
                 .font_size = 32,
             });
             if (path.device) |device| {
                 clay.text(device, .{
-                    .color = rl_color_to_arr(rl.Color.black.brightness(0.5)),
+                    .color = ui.rl_color_to_arr(rl.Color.black.brightness(0.5)),
                     .letter_spacing = 2,
                     .font_size = 24,
                 });
@@ -570,7 +392,7 @@ fn render_dir_entries(viewer_data: *Page.ViewerData, dir_entries: []DirEntry) vo
                 .padding = clay.Padding.axes(16, 8),
             },
             .border = border: {
-                const color = rl_color_to_arr(rl.Color.gray.brightness(0.8));
+                const color = ui.rl_color_to_arr(rl.Color.gray.brightness(0.8));
                 var config = clay_border_all(color, 4, 8);
                 config.width.between_children = 3;
                 break :border config;
@@ -593,7 +415,7 @@ fn render_dir_entries(viewer_data: *Page.ViewerData, dir_entries: []DirEntry) vo
             }
         });
 
-        const dir_entries_data = frame_arena_alloc.create(ClayCustom) catch {
+        const dir_entries_data = frame_arena_alloc.create(ui.ClayCustom) catch {
             std.debug.print("ERROR: failed to allocate ClayCustom in frame arena\n", .{});
             return;
         };
@@ -604,7 +426,7 @@ fn render_dir_entries(viewer_data: *Page.ViewerData, dir_entries: []DirEntry) vo
             .layout = .{
                 .sizing = child_sizing,
             },
-            .background_color = rl_color_to_arr(rl.Color.gray.brightness(0.5)),
+            .background_color = ui.rl_color_to_arr(rl.Color.gray.brightness(0.5)),
             .custom = .{
                 .custom_data = @ptrCast(@constCast(dir_entries_data)),
             },
@@ -646,7 +468,7 @@ fn render_dir_entry(viewer_data: *Page.ViewerData, entry: DirEntry, index: usize
                 .child_alignment = .{ .x = .center },
                 .padding = clay.Padding.axes(4, 8),
             },
-            .background_color = rl_color_to_arr(rl.Color.sky_blue),
+            .background_color = ui.rl_color_to_arr(rl.Color.sky_blue),
             .corner_radius = clay.CornerRadius.all(4),
         })({
             if (is_clicked(nav_button_id)) {
@@ -681,7 +503,7 @@ fn render_top_bar(viewer_data: *Page.ViewerData) void {
                     .y = .center,
                 },
             },
-            .background_color = rl_color_to_arr(rl.Color.gray.brightness(if (is_hovered(back_button_id)) 0.9 else 0.8)),
+            .background_color = ui.rl_color_to_arr(rl.Color.gray.brightness(if (is_hovered(back_button_id)) 0.9 else 0.8)),
             .corner_radius = clay.CornerRadius.all(1.0),
         })({
             if (is_hovered(back_button_id) and rl.isMouseButtonPressed(.left)) {
@@ -707,7 +529,7 @@ fn render_breadcrumbs(viewer_data: *Page.ViewerData) void {
                 .child_gap = 8,
                 .padding = clay.Padding.axes(4, 6),
             },
-            .background_color = if (is_hovered(crumb_button_id) and !crumb_is_current) rl_color_to_arr(rl.Color.gray.brightness(0.92)) else .{ 0, 0, 0, 0 },
+            .background_color = if (is_hovered(crumb_button_id) and !crumb_is_current) ui.rl_color_to_arr(rl.Color.gray.brightness(0.92)) else .{ 0, 0, 0, 0 },
             .corner_radius = clay.CornerRadius.all(3),
         })({
             if (is_hovered(crumb_button_id) and rl.isMouseButtonPressed(.left) and !crumb_is_current) {
@@ -721,13 +543,13 @@ fn render_breadcrumbs(viewer_data: *Page.ViewerData) void {
             clay.text(crumb_name, .{
                 .letter_spacing = 2,
                 .font_size = 26,
-                .color = rl_color_to_arr(rl.Color.black.brightness(if (crumb_is_current) 0.4 else 0.2)),
+                .color = ui.rl_color_to_arr(rl.Color.black.brightness(if (crumb_is_current) 0.4 else 0.2)),
             });
             if (!std.mem.endsWith(u8, crumb_name, "/")) {
                 clay.text("/", .{
                     .letter_spacing = 2,
                     .font_size = 26,
-                    .color = rl_color_to_arr(rl.Color.black.brightness(if (crumb_is_current) 0.4 else 0.2)),
+                    .color = ui.rl_color_to_arr(rl.Color.black.brightness(if (crumb_is_current) 0.4 else 0.2)),
                 });
             }
         });
@@ -742,7 +564,7 @@ fn is_hovered(id: clay.ElementId) bool {
     return clay.pointerOver(id);
 }
 
-const DirEntry = struct {
+pub const DirEntry = struct {
     name: [:0]const u8,
     size_bytes: u64,
     fs_store_entry_ptr: *fs_index.FS_Store.Entry,
@@ -755,185 +577,6 @@ const DirEntry = struct {
 
 // https://cgl.ethz.ch/teaching/scivis_common/Literature/squarifiedTreeMaps.pdf
 // https://github.com/nicopolyptic/treemap/blob/master/src/main/ts/squarifier.ts
-fn squarify(alloc: Allocator, dir_entries: []const DirEntry, rect: rl.Rectangle) void {
-    // TODO: scaleWeights?
-    // this.scaleWeights(nodes, width, height);
-    std.debug.assert(std.sort.isSorted(DirEntry, dir_entries, {}, DirEntry.gt_than));
-    const util = struct {
-        fn sum(row: []const f32) f32 {
-            var sum_: f32 = 0;
-            for (row) |d| {
-                sum_ += d;
-            }
-            return sum_;
-        }
-        fn min(row: []const f32) f32 {
-            var min_: f32 = std.math.floatMax(f32);
-            for (row) |d| {
-                min_ = @min(min_, d);
-            }
-            return min_;
-        }
-        fn max(row: []const f32) f32 {
-            var max_: f32 = 0;
-            for (row) |d| {
-                max_ = @max(max_, d);
-            }
-            return max_;
-        }
-
-        fn worst(s: f32, min_: f32, max_: f32, w: f32) f32 {
-            return @max((w * w * max_) / (s * s), (s * s) / (w * w * min_));
-        }
-
-        fn draw_rect(rec: rl.Rectangle, color: rl.Color) void {
-            const border_width: f32 = 3.0;
-            var inset = rec;
-            inset.x += border_width / 2;
-            inset.y += border_width / 2;
-            inset.width -= border_width / 2;
-            inset.height -= border_width / 2;
-            if (inset.width <= 0 or inset.height <= 0) return;
-            rl.drawRectangleRec(inset, color);
-        }
-
-        fn flush_row(
-            vertical: bool,
-            x: *f32,
-            y: *f32,
-            rw: *f32,
-            rh: *f32,
-            row_weights: []const f32,
-            row_colors: []const rl.Color,
-        ) void {
-            if (row_weights.len == 0) return;
-
-            var rx = x.*;
-            var ry = y.*;
-            const s = sum(row_weights);
-            const w = if (vertical) rh.* else rw.*;
-            const z = s / w;
-
-            for (0..row_weights.len) |j| {
-                const d = row_weights[j] / z;
-                const color = row_colors[j];
-                const rec: rl.Rectangle = if (vertical)
-                    .{ .x = rx, .y = ry, .width = z, .height = d }
-                else
-                    .{ .x = rx, .y = ry, .width = d, .height = z };
-
-                if (vertical) {
-                    ry += d;
-                } else {
-                    rx += d;
-                }
-
-                draw_rect(rec, color);
-            }
-
-            if (vertical) {
-                x.* += z;
-                rw.* -= z;
-            } else {
-                y.* += z;
-                rh.* -= z;
-            }
-        }
-    };
-
-    const min_aggregate_percent: f32 = 0.0001;
-
-    const weights = alloc.alloc(f32, dir_entries.len) catch unreachable;
-    {
-        var sum_: f32 = 0;
-        for (dir_entries) |d| {
-            sum_ += @floatFromInt(d.size_bytes);
-        }
-
-        const scale = (rect.width * rect.height) / sum_;
-        for (dir_entries, weights) |d, *w| {
-            w.* = scale * @as(f32, @floatFromInt(d.size_bytes));
-        }
-    }
-    const colors = generate_palette(alloc, weights, .{ .sample = .verdis }) catch unreachable;
-
-    // background
-    rl.drawRectangleRec(rect, .light_gray);
-
-    var vertical = rect.height < rect.width;
-    var x = rect.x;
-    var y = rect.y;
-    var rw = rect.width;
-    var rh = rect.height;
-
-    var row = std.ArrayList(DirEntry).initCapacity(alloc, dir_entries.len) catch unreachable;
-    var row_weights = std.ArrayList(f32).initCapacity(alloc, dir_entries.len) catch unreachable;
-    var row_colors = std.ArrayList(rl.Color).initCapacity(alloc, dir_entries.len) catch unreachable;
-
-    var i: u32 = 0;
-    while (i < dir_entries.len) {
-        const c = dir_entries[i];
-        const r: f32 = weights[i];
-        const remaining_percent = r / (rect.width * rect.height);
-
-        if (row.items.len == 0 and remaining_percent < min_aggregate_percent) {
-            util.draw_rect(
-                .{ .x = x, .y = y, .width = rw, .height = rh },
-                colors[i],
-            );
-            return;
-        }
-
-        const row_sum = util.sum(row_weights.items);
-        const min = util.min(row_weights.items);
-        const max = util.max(row_weights.items);
-        const w = if (vertical) rh else rw;
-        const wit = util.worst(row_sum + r, @min(min, r), @max(max, r), w);
-        const without = util.worst(row_sum, min, max, w);
-        if (row.items.len == 0 or wit < without) {
-            row.appendAssumeCapacity(c);
-            row_weights.appendAssumeCapacity(r);
-            row_colors.appendAssumeCapacity(colors[i]);
-            i += 1;
-            continue;
-        }
-
-        util.flush_row(
-            vertical,
-            &x,
-            &y,
-            &rw,
-            &rh,
-            row_weights.items,
-            row_colors.items,
-        );
-
-        vertical = rh < rw;
-        row.clearRetainingCapacity();
-        row_weights.clearRetainingCapacity();
-        row_colors.clearRetainingCapacity();
-    }
-
-    if (row_weights.items.len > 0) {
-        const row_percent = util.sum(row_weights.items) / (rect.width * rect.height);
-        if (row_percent < min_aggregate_percent) {
-            util.draw_rect(
-                .{ .x = x, .y = y, .width = rw, .height = rh },
-                row_colors.items[0],
-            );
-        } else {
-            util.flush_row(
-                vertical,
-                &x,
-                &y,
-                &rw,
-                &rh,
-                row_weights.items,
-                row_colors.items,
-            );
-        }
-    }
-}
 
 fn fmt_file_size(alloc: Allocator, bytes: u64) [:0]const u8 {
     const units = [_][]const u8{ "B", "KB", "MB", "GB", "TB", "PB" };
@@ -988,166 +631,9 @@ fn divide_in_2_with_padding(rect: rl.Rectangle, padding: f32) struct { rl.Rectan
     return .{ left, right };
 }
 
-/// RGB color structure with values between 0 and 1
-pub const RGB = struct {
-    r: f32,
-    g: f32,
-    b: f32,
-
-    pub fn from_arr(rgb: [3]f32) RGB {
-        return RGB{
-            .r = rgb[0],
-            .g = rgb[1],
-            .b = rgb[2],
-        };
-    }
-};
-
-/// Linear interpolation between two values
-fn lerp(start: f32, end: f32, t: f32) f32 {
-    return start + t * (end - start);
-}
-
-/// Linear interpolation between two RGB colors
-fn lerpColor(c1: RGB, c2: RGB, t: f32) RGB {
-    return RGB{
-        .r = lerp(c1.r, c2.r, t),
-        .g = lerp(c1.g, c2.g, t),
-        .b = lerp(c1.b, c2.b, t),
-    };
-}
-
-/// Rainbow color map (follows the HSV color wheel)
-pub fn rainbowColor(value: f32) RGB {
-    const v = std.math.clamp(value, 0.0, 1.0);
-    const h = 1.0 - v; // Reverse direction to match common rainbow maps
-
-    // Convert HSV to RGB (simplified for hue only, S=V=1)
-    const h_i: u32 = @intFromFloat(h * 6.0);
-    const f = h * 6.0 - @as(f32, @floatFromInt(h_i));
-    const p = 0.0;
-    const q = 1.0 - f;
-    const t = f;
-
-    switch (h_i) {
-        0 => return RGB{ .r = 1.0, .g = t, .b = p },
-        1 => return RGB{ .r = q, .g = 1.0, .b = p },
-        2 => return RGB{ .r = p, .g = 1.0, .b = t },
-        3 => return RGB{ .r = p, .g = q, .b = 1.0 },
-        4 => return RGB{ .r = t, .g = p, .b = 1.0 },
-        else => return RGB{ .r = 1.0, .g = p, .b = q },
-    }
-}
-
-pub fn colormapColor(comptime sample: colormaps.options) *const fn (f32) RGB {
-    const map = comptime sample.map();
-    const inverse = switch (sample) {
-        .turbo => false,
-        else => true,
-    };
-
-    return struct {
-        fn get(value: f32) RGB {
-            const v = std.math.clamp(value, 0.0, 1.0);
-
-            const segment = (if (inverse) 1.0 - v else v) * (@as(f32, @floatFromInt(map.len)) - 1.0);
-            const i: usize = @intFromFloat(segment);
-            const t = segment - @floor(segment);
-
-            if (i >= map.len - 1) return RGB.from_arr(map[map.len - 1]);
-            return lerpColor(RGB.from_arr(map[i]), RGB.from_arr(map[i + 1]), t);
-        }
-    }.get;
-}
-
-pub const ColorScheme = union(enum) {
-    rainbow: void,
-    sample: colormaps.options,
-};
-
-pub fn generate_palette(
-    alloc: Allocator,
-    weights: []const f32,
-    scheme: ColorScheme,
-) ![]rl.Color {
-    if (weights.len == 0) return &[_]rl.Color{};
-
-    const colormap = switch (scheme) {
-        .rainbow => rainbowColor,
-        .sample => |sample_scheme| switch (sample_scheme) {
-            inline else => |value| colormapColor(value),
-        },
-    };
-    // Find min and max weights for normalization
-    var min_weight: f32 = weights[0];
-    var max_weight: f32 = weights[0];
-
-    for (weights) |w| {
-        min_weight = @min(min_weight, w);
-        max_weight = @max(max_weight, w);
-    }
-
-    const range = max_weight - min_weight;
-
-    // Generate colors
-    var colors = try alloc.alloc(rl.Color, weights.len);
-
-    for (weights, 0..) |w, i| {
-        const normalized = if (range == 0.0) 0.0 else (w - min_weight) / range;
-        const color = colormap(normalized);
-        colors[i] = rl.colorFromNormalized(.{
-            .x = color.r,
-            .y = color.g,
-            .z = color.b,
-            .w = 1.0,
-        });
-    }
-
-    return colors;
-}
-
-fn clay_measure_text(text_value: []const u8, ctx: *clay.TextElementConfig, user_data: void) clay.Dimensions {
-    _ = user_data;
-    const measured = font_system.measureText(
-        text_value,
-        @floatFromInt(ctx.font_size),
-        @floatFromInt(ctx.letter_spacing),
-    );
-    return .{
-        .w = measured.x,
-        .h = measured.y,
-    };
-}
-
-fn rl_color_to_arr(color: rl.Color) [4]f32 {
-    return .{ @floatFromInt(color.r), @floatFromInt(color.g), @floatFromInt(color.b), @floatFromInt(color.a) };
-}
-
-fn rl_color_from_arr(arr: [4]f32) rl.Color {
-    return .{
-        .r = @intFromFloat(arr[0]),
-        .g = @intFromFloat(arr[1]),
-        .b = @intFromFloat(arr[2]),
-        .a = @intFromFloat(arr[3]),
-    };
-}
-
 fn clay_border_all(color: clay.Color, width: u16, _: f32) clay.BorderElementConfig {
     return clay.BorderElementConfig{
         .color = color,
         .width = clay.BorderWidth.outside(width),
     };
 }
-
-const ClayCustom = union(enum) {
-    none: void,
-    squarified_treemap: struct {
-        dir_entries: []const DirEntry,
-    },
-
-    const NONE: ClayCustom = .{ .none = {} };
-
-    pub fn noneConfig() clay.ElementDeclaration {
-        return .{ .custom = .{ .custom_data = @ptrCast(@constCast(&NONE)) } };
-    }
-};
