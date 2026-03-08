@@ -1,14 +1,15 @@
 const std = @import("std");
-const lib = @import("root.zig");
 const Thread = std.Thread;
 const Allocator = std.mem.Allocator;
 
 const colormaps = @import("colormaps.zig");
 
+const fs_index = @import("fs-index");
+const text = @import("text");
+
 const rl = @import("raylib");
 const rgui = @import("raygui");
 const clay = @import("zclay");
-const text = @import("text");
 
 const alloc_state = std.heap.page_allocator;
 var frame_arena = std.heap.ArenaAllocator.init(alloc_state);
@@ -18,7 +19,7 @@ var font_system: text.FontSystem = undefined;
 
 var page_current: Page = Page.create_select();
 var page_next: ?Page = null;
-var entry_next: ?*lib.FS_Store.Entry = null;
+var entry_next: ?*fs_index.FS_Store.Entry = null;
 const screenWidth = 600;
 const screenHeight = 800;
 
@@ -29,13 +30,13 @@ var win_dims: clay.Dimensions = .{
 
 const Page = union(enum) {
     select: struct {
-        paths: ?[]lib.TopLevelPath = null,
+        paths: ?[]fs_index.TopLevelPath = null,
     },
     viewer: struct {
         path: [:0]const u8,
-        fs_store: lib.FS_Store = undefined,
-        entry_cur: *lib.FS_Store.Entry = undefined,
-        nav_stack: std.ArrayList(*lib.FS_Store.Entry) = .empty,
+        fs_store: fs_index.FS_Store = undefined,
+        entry_cur: *fs_index.FS_Store.Entry = undefined,
+        nav_stack: std.ArrayList(*fs_index.FS_Store.Entry) = .empty,
         cancelled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
         worker_thread: ?std.Thread = null,
         dbg: struct {
@@ -115,7 +116,7 @@ pub fn main() anyerror!void {
                     page_current.viewer.entry_cur = page_current.viewer.fs_store.root_entry_ptr;
                     page_current.viewer.nav_stack = .empty;
                     page_current.viewer.nav_stack.append(alloc_state, page_current.viewer.fs_store.root_entry_ptr) catch unreachable;
-                    page_current.viewer.worker_thread = Thread.spawn(.{}, lib.index_paths_starting_with, .{
+                    page_current.viewer.worker_thread = Thread.spawn(.{}, fs_index.index_paths_starting_with, .{
                         page_current.viewer.path,
                         alloc_state,
                         &page_current.viewer.fs_store,
@@ -382,7 +383,7 @@ fn draw() !void {
 fn render_select(select_data: *Page.SelectData) !void {
     // FIXME: cache
     // FIXME: ensure no unessecary dupeZ in lib.get_top_level_paths
-    select_data.paths = lib.get_top_level_paths(frame_arena_alloc, frame_arena_alloc) catch |err| err: {
+    select_data.paths = fs_index.get_top_level_paths(frame_arena_alloc, frame_arena_alloc) catch |err| err: {
         std.debug.print("ERROR: Failed to retrieve file paths: {any}\n", .{err});
         break :err &.{};
     };
@@ -427,7 +428,7 @@ fn render_select(select_data: *Page.SelectData) !void {
     });
 }
 
-fn render_select_entry(path: lib.TopLevelPath, index: usize) void {
+fn render_select_entry(path: fs_index.TopLevelPath, index: usize) void {
     const top_level_path_id = clay.ElementId.IDI("TopLevelPath", @intCast(index));
     clay.UI()(.{
         .id = top_level_path_id,
@@ -744,7 +745,7 @@ fn is_hovered(id: clay.ElementId) bool {
 const DirEntry = struct {
     name: [:0]const u8,
     size_bytes: u64,
-    fs_store_entry_ptr: *lib.FS_Store.Entry,
+    fs_store_entry_ptr: *fs_index.FS_Store.Entry,
 
     fn gt_than(_: void, lhs: DirEntry, rhs: DirEntry) bool {
         return lhs.size_bytes > rhs.size_bytes or
