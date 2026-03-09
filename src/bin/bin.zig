@@ -2,15 +2,13 @@ const std = @import("std");
 const Thread = std.Thread;
 const Allocator = std.mem.Allocator;
 
-const colormaps = @import("colormaps.zig");
-
 const fs_index = @import("fs-index");
 const text = @import("text");
 const ui = @import("ui");
 
 const rl = @import("raylib");
 const rgui = @import("raygui");
-const clay = @import("zclay");
+const clay = @import("clay");
 
 const alloc_state = std.heap.page_allocator;
 var frame_arena = std.heap.ArenaAllocator.init(alloc_state);
@@ -139,6 +137,8 @@ pub fn main() anyerror!void {
             .h = @floatFromInt(rl.getRenderHeight()),
         };
 
+        ui.interaction.fill_events_from_raylib();
+
         clay.setLayoutDimensions(win_dims);
         const pointer_pos = rl.getMousePosition();
         clay.setPointerState(
@@ -209,44 +209,46 @@ fn render_select(select_data: *Page.SelectData) !void {
         std.debug.print("ERROR: Failed to retrieve file paths: {any}\n", .{err});
         break :err &.{};
     };
-    clay.UI()(.{
+    ui.ui_box(.{
         .id = .ID("Page_Select"),
         .layout = .{
             .direction = .top_to_bottom,
-            .sizing = .{ .h = clay.SizingAxis.grow, .w = clay.SizingAxis.grow },
+            .sizing = .{ .h = .grow, .w = .grow },
             .child_alignment = .{ .x = .center, .y = .top },
             .child_gap = 32,
         },
+    });
+    defer ui.box_end();
+
+    ui.ui_box(.{
+        .id = .ID("Select_Title"),
+        .layout = .{
+            .padding = .all(16),
+            .sizing = .{ .w = .fit, .h = .fit },
+        },
+    });
+    clay.text("Select Path or Drive to View", .{
+        .font_size = 48,
+        .letter_spacing = 4,
+    });
+    ui.box_end();
+
+    clay.UI()(.{
+        .id = clay.ElementId.ID("Select_Paths"),
+        .layout = .{
+            .direction = .top_to_bottom,
+            .child_alignment = .{ .x = .left, .y = .top },
+            .sizing = .{
+                .w = .percent(0.6),
+                .h = .fit,
+            },
+            .padding = clay.Padding.all(8),
+            .child_gap = 16,
+        },
     })({
-        clay.UI()(.{
-            .id = .ID("Select_Title"),
-            .layout = .{
-                .padding = .all(16),
-                .sizing = .{ .w = .fit, .h = .fit },
-            },
-        })({
-            clay.text("Select Path or Drive to View", .{
-                .font_size = 48,
-                .letter_spacing = 4,
-            });
-        });
-        clay.UI()(.{
-            .id = clay.ElementId.ID("Select_Paths"),
-            .layout = .{
-                .direction = .top_to_bottom,
-                .child_alignment = .{ .x = .left, .y = .top },
-                .sizing = .{
-                    .w = clay.SizingAxis.percent(0.6),
-                    .h = clay.SizingAxis.fit,
-                },
-                .padding = clay.Padding.all(8),
-                .child_gap = 16,
-            },
-        })({
-            for (select_data.paths.?, 0..) |path, index| {
-                render_select_entry(path, index);
-            }
-        });
+        for (select_data.paths.?, 0..) |path, index| {
+            render_select_entry(path, index);
+        }
     });
 }
 
@@ -258,8 +260,8 @@ fn render_select_entry(path: fs_index.TopLevelPath, index: usize) void {
             .direction = .left_to_right,
             .padding = clay.Padding.all(16),
             .sizing = .{
-                .w = clay.SizingAxis.grow,
-                .h = clay.SizingAxis.grow,
+                .w = .grow,
+                .h = .grow,
             },
         },
         .border = clay_border_all(
@@ -328,7 +330,7 @@ fn render_viewer(viewer_data: *Page.ViewerData) !void {
         .id = page_select_id,
         .layout = .{
             .direction = .top_to_bottom,
-            .sizing = .{ .h = clay.SizingAxis.grow, .w = clay.SizingAxis.grow },
+            .sizing = .{ .h = .grow, .w = .grow },
             .child_alignment = .{ .x = .center, .y = .top },
             .child_gap = 32,
             .padding = clay.Padding.all(16),
@@ -352,7 +354,7 @@ fn render_dir_entries(viewer_data: *Page.ViewerData, dir_entries: []DirEntry) vo
                 .x = .center,
                 .y = .center,
             },
-            .sizing = .{ .w = clay.SizingAxis.grow, .h = clay.SizingAxis.grow },
+            .sizing = .{ .w = .grow, .h = .grow },
             .padding = clay.Padding.all(32),
         },
     })({
@@ -364,8 +366,8 @@ fn render_dir_entries(viewer_data: *Page.ViewerData, dir_entries: []DirEntry) vo
         }
 
         const child_sizing = switch (orientation) {
-            .top_to_bottom => clay.Sizing{ .w = clay.SizingAxis.grow, .h = clay.SizingAxis.percent(0.5) },
-            .left_to_right => clay.Sizing{ .w = clay.SizingAxis.percent(0.5), .h = clay.SizingAxis.grow },
+            .top_to_bottom => clay.Sizing{ .w = .grow, .h = .percent(0.5) },
+            .left_to_right => clay.Sizing{ .w = .percent(0.5), .h = .grow },
         };
 
         const list_height = if (scroll_data.found) scroll_data.content_dimensions.h else switch (orientation) {
@@ -441,7 +443,7 @@ fn render_dir_entry(viewer_data: *Page.ViewerData, entry: DirEntry, index: usize
             .padding = clay.Padding.all(8),
             .direction = .left_to_right,
             .child_alignment = .{ .y = .center },
-            .sizing = .{ .w = clay.SizingAxis.grow, .h = clay.SizingAxis.fixed(56) },
+            .sizing = .{ .w = .grow, .h = .fixed(56) },
         },
     })({
         clay.text(entry.name, .{
@@ -451,7 +453,7 @@ fn render_dir_entry(viewer_data: *Page.ViewerData, entry: DirEntry, index: usize
 
         clay.UI()(.{
             .layout = .{
-                .sizing = .{ .w = clay.SizingAxis.grow },
+                .sizing = .{ .w = .grow },
             },
         })({});
 
@@ -488,7 +490,7 @@ fn render_top_bar(viewer_data: *Page.ViewerData) void {
             .direction = .left_to_right,
             .child_alignment = .{ .x = .left, .y = .center },
             .child_gap = 8,
-            .sizing = .{ .w = clay.SizingAxis.grow },
+            .sizing = .{ .w = .grow },
             .padding = clay.Padding.axes(0, 56),
         },
     })({
@@ -496,7 +498,7 @@ fn render_top_bar(viewer_data: *Page.ViewerData) void {
         clay.UI()(.{
             .id = back_button_id,
             .layout = .{
-                .sizing = .{ .w = clay.SizingAxis.fixed(36), .h = clay.SizingAxis.fixed(36) },
+                .sizing = .{ .w = .fixed(36), .h = .fixed(36) },
                 .padding = clay.Padding.all(4),
                 .child_alignment = .{
                     .x = .center,

@@ -73,10 +73,8 @@ pub fn build(b: *std.Build) void {
         const raygui = raylib_dep.module("raygui"); // raygui module
         const raylib_artifact = raylib_dep.artifact("raylib"); // raylib C library
 
-        for (modules, exes) |mod, exe| {
-            if (exe) |executable| {
-                executable.linkLibrary(raylib_artifact);
-            }
+        for (modules) |mod| {
+            mod.linkLibrary(raylib_artifact);
             mod.addImport("raylib", raylib);
             mod.addImport("raygui", raygui);
         }
@@ -88,7 +86,7 @@ pub fn build(b: *std.Build) void {
         });
 
         for (modules) |mod| {
-            mod.addImport("zclay", zclay_dep.module("zclay"));
+            mod.addImport("clay", zclay_dep.module("zclay"));
         }
     }
     {
