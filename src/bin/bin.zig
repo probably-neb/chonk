@@ -77,7 +77,7 @@ pub fn main() anyerror!void {
     while (!rl.windowShouldClose()) { // Detect window close button or ESC key
         // TODO: max water mark
         defer _ = frame_arena.reset(.retain_capacity);
-        ui.interaction.fill_events_from_raylib();
+        // ui.interaction.fill_events_from_raylib();
         if (page_next) |pn| page_swap: {
             defer page_next = null;
             // Signal cancellation and wait for worker thread BEFORE swapping pages,
@@ -138,7 +138,7 @@ pub fn main() anyerror!void {
             .h = @floatFromInt(rl.getRenderHeight()),
         };
 
-        ui.interaction.fill_events_from_raylib();
+        // ui.interaction.fill_events_from_raylib();
 
         clay.setLayoutDimensions(win_dims);
         const pointer_pos = rl.getMousePosition();
@@ -210,7 +210,7 @@ fn render_select(select_data: *Page.SelectData) !void {
         std.debug.print("ERROR: Failed to retrieve file paths: {any}\n", .{err});
         break :err &.{};
     };
-    ui.ui_box(.{
+    clay.UI()(.{
         .id = .ID("Page_Select"),
         .layout = .{
             .direction = .top_to_bottom,
@@ -218,38 +218,36 @@ fn render_select(select_data: *Page.SelectData) !void {
             .child_alignment = .{ .x = .center, .y = .top },
             .child_gap = 32,
         },
-    });
-    defer ui.box_end();
-
-    ui.ui_box(.{
-        .id = .ID("Select_Title"),
-        .layout = .{
-            .padding = .all(16),
-            .sizing = .{ .w = .fit, .h = .fit },
-        },
-    });
-    clay.text("Select Path or Drive to View", .{
-        .font_size = 48,
-        .letter_spacing = 4,
-    });
-    ui.box_end();
-
-    clay.UI()(.{
-        .id = clay.ElementId.ID("Select_Paths"),
-        .layout = .{
-            .direction = .top_to_bottom,
-            .child_alignment = .{ .x = .left, .y = .top },
-            .sizing = .{
-                .w = .percent(0.6),
-                .h = .fit,
-            },
-            .padding = clay.Padding.all(8),
-            .child_gap = 16,
-        },
     })({
-        for (select_data.paths.?, 0..) |path, index| {
-            render_select_entry(path, index);
-        }
+        clay.UI()(.{
+            .id = .ID("Select_Title"),
+            .layout = .{
+                .padding = .all(16),
+                .sizing = .{ .w = .fit, .h = .fit },
+            },
+        })({
+            clay.text("Select Path or Drive to View", .{
+                .font_size = 48,
+                .letter_spacing = 4,
+            });
+        });
+        clay.UI()(.{
+            .id = clay.ElementId.ID("Select_Paths"),
+            .layout = .{
+                .direction = .top_to_bottom,
+                .child_alignment = .{ .x = .left, .y = .top },
+                .sizing = .{
+                    .w = .percent(0.6),
+                    .h = .fit,
+                },
+                .padding = clay.Padding.all(8),
+                .child_gap = 16,
+            },
+        })({
+            for (select_data.paths.?, 0..) |path, index| {
+                render_select_entry(path, index);
+            }
+        });
     });
 }
 

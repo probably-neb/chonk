@@ -368,6 +368,7 @@ pub const Box = struct {
     string: []const u8 = "",
     display_string: []const u8 = "",
     text_align: TextAlign = .left,
+    // TODO: cache
     text_sizing: [2]f32 = .{ 0, 0 },
     text_spacing: f32 = 0.0,
     font_size: f32 = 0.0,
