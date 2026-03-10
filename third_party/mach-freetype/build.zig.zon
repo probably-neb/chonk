@@ -1,0 +1,26 @@
+.{
+    .name = "mach_freetype",
+    .version = "0.0.0",
+    .paths = .{
+        "deps",
+        "examples",
+        "src",
+        "build.zig",
+        "build.zig.zon",
+        "LICENSE",
+        "LICENSE-APACHE",
+        "LICENSE-MIT",
+        "LICENSE.freetype",
+        "README.md",
+    },
+    .dependencies = .{
+        .freetype = .{
+            .path = "./deps/freetype-972cd37bccecae2cc9f54cf0b562263a13209d02",
+            .lazy = true,
+        },
+        .harfbuzz = .{
+            .path = "./deps/harfbuzz-c514da98afcf5d9ad6854a7f09192f9ecfaeb061",
+            .lazy = true,
+        },
+    },
+}

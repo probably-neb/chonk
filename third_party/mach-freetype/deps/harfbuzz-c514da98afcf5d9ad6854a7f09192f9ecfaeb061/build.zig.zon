@@ -1,0 +1,26 @@
+.{
+    .name = "harfbuzz",
+    .version = "0.0.0",
+    .paths = .{
+        "include",
+        "src",
+        "AUTHORS",
+        "build.zig",
+        "build.zig.zon",
+        "COPYING",
+        "README.md",
+        "THANKS",
+        "update.sh",
+        "verify.sh",
+    },
+    .dependencies = .{
+        .freetype = .{
+            .path = "../freetype-972cd37bccecae2cc9f54cf0b562263a13209d02",
+        },
+        .brotli = .{
+            .url = "https://pkg.machengine.org/brotli/10961426f03016e273f4f4653eae907e9e2339b6.tar.gz",
+            .hash = "122031789a7c6364c2f99164c1183661bb5fe914ad7336cc224039c7fba649f35c47",
+            .lazy = true,
+        },
+    },
+}
