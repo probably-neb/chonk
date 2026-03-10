@@ -8,6 +8,7 @@ const assert = std.debug.assert;
 
 pub fn fill_events_from_raylib() void {
     const rl = @import("raylib");
+    // TODO! use frame arena
     const scratch = Arena.get_scratch(&.{});
     defer scratch.release();
 
@@ -173,7 +174,7 @@ pub fn fill_events_from_raylib() void {
 
     var event = state.events.first;
     while (event) |ev| {
-        std.debug.print("EVENT: {any}\n", .{ev});
+        // std.debug.print("EVENT: {any}\n", .{ev});
         event = ev.next;
     }
 }

@@ -2,10 +2,10 @@ const clay = @import("clay");
 const rl = @import("raylib");
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const ui = @import("ui.zig");
+const ClayCustom = ui.ClayCustom;
 
 const text = @import("text");
-const ui = @import("ui");
-const ClayCustom = ui.ClayCustom;
 
 const frame_arena = @import("bin").frame_arena_alloc;
 

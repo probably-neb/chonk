@@ -1,5 +1,6 @@
 pub const FontSystem = @import("font_system.zig").FontSystem;
 pub const glyph_cache = @import("glyph_cache.zig");
+const rl = @import("raylib");
 
 pub var font_system: FontSystem = undefined;
 
@@ -18,4 +19,12 @@ pub fn clay_measure_text(text_value: []const u8, ctx: *@import("clay").TextEleme
         .w = measured.x,
         .h = measured.y,
     };
+}
+
+pub fn measure_text(text_value: []const u8, font_size: f32, letter_spacing: f32) rl.Vector2 {
+    return font_system.measureText(
+        text_value,
+        font_size,
+        letter_spacing,
+    );
 }

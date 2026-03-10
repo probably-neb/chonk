@@ -77,6 +77,7 @@ pub fn main() anyerror!void {
     while (!rl.windowShouldClose()) { // Detect window close button or ESC key
         // TODO: max water mark
         defer _ = frame_arena.reset(.retain_capacity);
+        ui.interaction.fill_events_from_raylib();
         if (page_next) |pn| page_swap: {
             defer page_next = null;
             // Signal cancellation and wait for worker thread BEFORE swapping pages,
@@ -571,7 +572,7 @@ pub const DirEntry = struct {
     size_bytes: u64,
     fs_store_entry_ptr: *fs_index.FS_Store.Entry,
 
-    fn gt_than(_: void, lhs: DirEntry, rhs: DirEntry) bool {
+    pub fn gt_than(_: void, lhs: DirEntry, rhs: DirEntry) bool {
         return lhs.size_bytes > rhs.size_bytes or
             (lhs.size_bytes == rhs.size_bytes and std.mem.lessThan(u8, lhs.name, rhs.name));
     }

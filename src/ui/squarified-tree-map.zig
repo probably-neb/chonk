@@ -6,7 +6,7 @@ const colormaps = @import("colormaps.zig");
 
 const rl = @import("raylib");
 
-fn squarify(alloc: Allocator, dir_entries: []const DirEntry, rect: rl.Rectangle) void {
+pub fn squarify(alloc: Allocator, dir_entries: []const DirEntry, rect: rl.Rectangle) void {
     // TODO: scaleWeights?
     // this.scaleWeights(nodes, width, height);
     std.debug.assert(std.sort.isSorted(DirEntry, dir_entries, {}, DirEntry.gt_than));

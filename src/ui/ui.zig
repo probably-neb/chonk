@@ -1,31 +1,36 @@
 const std = @import("std");
 const base = @import("base");
 const Arena = base.Arena;
+const text = @import("text");
 
 const assert = std.debug.assert;
 
 pub const layout_mod = @import("layout.zig");
 pub const interaction = @import("interaction.zig");
+pub const draw_mod = @import("draw.zig");
+pub const draw = draw_mod.draw;
+pub const rl_color_from_arr = draw_mod.rl_color_from_arr;
+pub const rl_color_to_arr = draw_mod.rl_color_to_arr;
 
 // =============================
 // TODO REMOVE
 const DirEntry = @import("bin").DirEntry;
 const clay = @import("clay");
 
-const ClayCustom = union(enum) {
+pub const ClayCustom = union(enum) {
     none: void,
     squarified_treemap: struct {
         dir_entries: []const DirEntry,
     },
 
-    const NONE: ClayCustom = .{ .none = {} };
+    pub const NONE: ClayCustom = .{ .none = {} };
 
     pub fn noneConfig() clay.ElementDeclaration {
         return .{ .custom = .{ .custom_data = @ptrCast(@constCast(&NONE)) } };
     }
 };
 
-pub inline fn ui_box(config: clay.ElementConfiguration) clay.ElementId {
+pub inline fn ui_box(config: clay.ElementDeclaration) void {
     clay.cdefs.Clay__OpenElement();
     clay.cdefs.Clay__ConfigureOpenElement(config);
 }
@@ -33,6 +38,7 @@ pub inline fn ui_box(config: clay.ElementConfiguration) clay.ElementId {
 pub fn box_end() void {
     clay.cdefs.Clay__CloseElement();
 }
+
 // =============================
 
 // ---------------------------------------------------------------------------
@@ -111,13 +117,6 @@ pub fn find_separator(string: []const u8) ?Separator {
 }
 
 // ---------------------------------------------------------------------------
-// Color — re-exported from term (single source of truth)
-// ---------------------------------------------------------------------------
-
-pub const Ansi = term.Ansi;
-pub const Color = term.Color;
-
-// ---------------------------------------------------------------------------
 // Axis / TextAlign
 // ---------------------------------------------------------------------------
 
@@ -142,7 +141,7 @@ pub const TextAlign = enum {
 
 pub const SizeKind = enum {
     null,
-    cells,
+    pixels,
     text_content,
     parent_pct,
     children_sum,
@@ -153,8 +152,8 @@ pub const Size = struct {
     value: f32 = 0,
     strictness: f32 = 1,
 
-    pub fn cells(n: f32, strictness: f32) Size {
-        return .{ .kind = .cells, .value = n, .strictness = strictness };
+    pub fn pixels(n: f32, strictness: f32) Size {
+        return .{ .kind = .pixels, .value = n, .strictness = strictness };
     }
 
     pub fn text(pad: f32, strictness: f32) Size {
@@ -317,6 +316,35 @@ pub const SignalFlags = packed struct(u16) {
     }
 };
 
+const Color = struct {
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+
+    pub const default: Color = .rgba(.{ 0.0, 0.0, 0.0, 1.0 });
+
+    pub fn to_rgba(c: Color) [4]f32 {
+        return .{ c.r, c.g, c.b, c.a };
+    }
+
+    pub fn rgba(c: [4]f32) Color {
+        return .{ .r = c[0], .g = c[1], .b = c[2], .a = c[3] };
+    }
+
+    pub fn to_rgba_vec(c: Color) @Vector(4, f32) {
+        return .{ c.r, c.g, c.b, c.a };
+    }
+
+    pub fn rgba_vec(c: @Vector(4, f32)) Color {
+        return .{ .r = c[0], .g = c[1], .b = c[2], .a = c[3] };
+    }
+
+    pub fn eql(a: Color, b: Color) bool {
+        return a.r == b.r and a.g == b.b and a.g == b.g and a.a == b.a;
+    }
+};
+
 // ---------------------------------------------------------------------------
 // Box
 // ---------------------------------------------------------------------------
@@ -339,8 +367,10 @@ pub const Box = struct {
     flags: BoxFlags = .{},
     string: []const u8 = "",
     display_string: []const u8 = "",
-    fastpath_codepoint: u21 = 0,
     text_align: TextAlign = .left,
+    text_sizing: [2]f32 = .{ 0, 0 },
+    text_spacing: f32 = 0.0,
+    font_size: f32 = 0.0,
     pref_size: [2]Size = .{ .{}, .{} },
     child_layout_axis: Axis = .y,
     fixed_position: [2]f32 = .{ 0, 0 },
@@ -348,7 +378,7 @@ pub const Box = struct {
     min_size: [2]f32 = .{ 0, 0 },
 
     // custom rendering callback
-    custom_draw: ?*const fn (*Box, *term.draw.Grid, Rect) void = null,
+    custom_draw: ?*const fn (*Box, Rect) void = null,
     custom_draw_user_data: ?*anyopaque = null,
 
     // styling
@@ -484,13 +514,15 @@ pub fn Stack(comptime T: type) type {
 const stack_decls = .{
     .{ "parent", ?*Box, @as(?*Box, null) },
     .{ "child_layout_axis", Axis, Axis.y },
-    .{ "pref_width", Size, Size.cells(10, 1) },
-    .{ "pref_height", Size, Size.cells(1, 1) },
+    .{ "pref_width", Size, Size.pixels(10, 1) },
+    .{ "pref_height", Size, Size.pixels(1, 1) },
     .{ "flags", BoxFlags, BoxFlags{} },
     .{ "bg_color", Color, Color.default },
     .{ "fg_color", Color, Color.default },
     .{ "border_color", Color, Color.default },
     .{ "text_padding", u16, @as(u16, 0) },
+    .{ "text_spacing", f32, @as(f32, 0) },
+    .{ "font_size", f32, @as(f32, 0) },
     .{ "text_align", TextAlign, TextAlign.left },
     .{ "fixed_x", f32, @as(f32, 0) },
     .{ "fixed_y", f32, @as(f32, 0) },
@@ -601,19 +633,9 @@ pub fn get_build_arena() *Arena {
     return current_arena(&g);
 }
 
-/// Begin a new frame. Checks for terminal resize, clears the back buffer,
+/// Begin a new frame. clears the back buffer,
 /// processes last frame's events, swaps arenas, and creates the root box.
-pub fn begin_build(t: *term.Term, dt: f32) !*Box {
-    // could happen before layout, but this means screen size is accurate during ui construction
-    _ = try t.check_resize();
-    t.clear();
-    return begin_build_raw(t.cols, t.rows, dt);
-}
-
-/// Low-level begin_build that takes explicit dimensions. Use `begin_build`
-/// with a terminal in application code; this variant exists for tests that
-/// don't have a terminal.
-pub fn begin_build_raw(screen_w: u16, screen_h: u16, dt: f32) *Box {
+pub fn begin_build(screen_w: u16, screen_h: u16, dt: f32) *Box {
     g.dt = dt;
     if (g.root) |prev_root| {
         interaction.process_events(prev_root);
@@ -924,6 +946,11 @@ pub fn build_box(string: []const u8, extra_flags: BoxFlags) *Box {
     box.fixed_position = .{ top_stack(.fixed_x), top_stack(.fixed_y) };
     box.fixed_size = .{ top_stack(.fixed_width), top_stack(.fixed_height) };
     box.min_size = .{ top_stack(.min_width), top_stack(.min_height) };
+    box.text_spacing = top_stack(.text_spacing);
+    box.font_size = top_stack(.font_size);
+
+    const text_size = text.measure_text(tag.display, box.font_size, box.text_spacing);
+    box.text_sizing = .{ text_size.x, text_size.y };
 
     if (!box.key.is_zero()) {
         box_table_insert(box);
@@ -1050,18 +1077,18 @@ test "build_box applies stack tops and auto-pops set_next" {
 
     init(&arena);
 
-    push_bg(.{ .ansi = .red });
-    next_width(.cells(20, 1));
-    next_height(.cells(3, 1));
+    push_bg(.default);
+    next_width(.pixels(20, 1));
+    next_height(.pixels(3, 1));
 
     const b = build_box("hello", .{ .draw_text = true });
     try std.testing.expect(b.flags.draw_text);
-    try std.testing.expect(Color.eql(b.bg_color, .{ .ansi = .red }));
+    try std.testing.expect(Color.eql(b.bg_color, .default));
     try std.testing.expectEqual(@as(f32, 20), b.pref_size[0].value);
 
     // set_next values should be gone, push values remain
     try std.testing.expect(Color.eql(top_stack(.bg_color), .{ .ansi = .red }));
-    try std.testing.expectEqual(Size.cells(10, 1).value, top_stack(.pref_width).value);
+    try std.testing.expectEqual(Size.pixels(10, 1).value, top_stack(.pref_width).value);
 }
 
 test "push_parent_box links children" {
@@ -1111,7 +1138,7 @@ test "cross-frame persistence via begin_build/end_build" {
     defer deinit();
 
     // Frame 1: build a box with a known key
-    _ = begin_build_raw(80, 24, 1.0 / 60.0);
+    _ = begin_build(80, 24, 1.0 / 60.0);
     const b1 = build_box("persist_me##stable_key", .{ .draw_text = true });
     b1.hot_t = 0.75;
     b1.view_off = .{ 10, 20 };
@@ -1119,7 +1146,7 @@ test "cross-frame persistence via begin_build/end_build" {
     end_build();
 
     // Frame 2: build the same key — persistent fields should carry over
-    _ = begin_build_raw(80, 24, 1.0 / 60.0);
+    _ = begin_build(80, 24, 1.0 / 60.0);
     const b2 = build_box("persist_me##stable_key", .{ .draw_text = true });
     try std.testing.expect(b2.key == key1);
     try std.testing.expectEqual(@as(f32, 0.75), b2.hot_t);
@@ -1133,13 +1160,13 @@ test "stale boxes are pruned from hash table" {
     defer deinit();
 
     // Frame 1: build a box
-    _ = begin_build_raw(80, 24, 1.0 / 60.0);
+    _ = begin_build(80, 24, 1.0 / 60.0);
     const b1 = build_box("ephemeral##gone", .{});
     const key = b1.key;
     end_build();
 
     // Frame 2: do NOT build that box
-    _ = begin_build_raw(80, 24, 1.0 / 60.0);
+    _ = begin_build(80, 24, 1.0 / 60.0);
     end_build();
 
     // The old box should have been pruned
@@ -1150,10 +1177,10 @@ test "begin_build creates root and end_build runs layout" {
     try init_all();
     defer deinit();
 
-    _ = begin_build_raw(80, 24, 1.0 / 60.0);
+    _ = begin_build(80, 24, 1.0 / 60.0);
 
-    next_width(Size.cells(40, 1));
-    next_height(Size.cells(5, 1));
+    next_width(Size.pixels(40, 1));
+    next_height(Size.pixels(5, 1));
     _ = build_box("child##c1", .{});
 
     end_build();

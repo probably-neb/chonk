@@ -1,6 +1,5 @@
 const std = @import("std");
 const ui = @import("ui.zig");
-const draw = @import("term").draw;
 const Box = ui.Box;
 const Axis = ui.Axis;
 const Size = ui.Size;
@@ -43,11 +42,10 @@ fn resolve_standalone(box: *Box, comptime axis: Axis) void {
     const axis_index = @intFromEnum(axis);
     const size = box.pref_size[axis_index];
     switch (size.kind) {
-        .cells => box.fixed_size[axis_index] = size.value,
+        .pixels => box.fixed_size[axis_index] = size.value,
         .text_content => {
             if (axis == .x) {
-                const text_len: f32 = @floatFromInt(display_width(box.display_string));
-                box.fixed_size[axis_index] = text_len + size.value + @as(f32, @floatFromInt(box.text_padding)) * 2;
+                box.fixed_size[axis_index] = box.text_sizing[axis_index] + size.value + @as(f32, @floatFromInt(box.text_padding)) * 2;
             } else {
                 box.fixed_size[axis_index] = 1 + size.value;
             }
@@ -82,7 +80,7 @@ fn ancestor_resolved_size(box: *Box, comptime axis: Axis) f32 {
     var parent = box.parent;
     while (parent) |ancestor| {
         const kind = ancestor.pref_size[axis_index].kind;
-        if (kind == .cells or kind == .text_content or kind == .null) {
+        if (kind == .pixels or kind == .text_content or kind == .null) {
             const insets = border_insets(ancestor);
             return @max(ancestor.fixed_size[axis_index] - insets.before[axis_index] - insets.after[axis_index], 0);
         }
@@ -336,10 +334,6 @@ fn tree_next_within(current: *Box, root: *const Box) ?*Box {
     }
 }
 
-fn display_width(s: []const u8) usize {
-    return draw.text_display_width(s);
-}
-
 fn snap(v: f32) f32 {
     return @trunc(v);
 }
@@ -374,13 +368,13 @@ test "three equal children in a row" {
     defer arena.deinit();
 
     const root = try make_box(&arena);
-    root.pref_size = .{ Size.cells(30, 1), Size.cells(10, 1) };
+    root.pref_size = .{ Size.pixels(30, 1), Size.pixels(10, 1) };
     root.child_layout_axis = .x;
 
     var children: [3]*Box = undefined;
     for (&children) |*cp| {
         const c = try make_box(&arena);
-        c.pref_size = .{ Size.cells(10, 1), Size.cells(10, 1) };
+        c.pref_size = .{ Size.pixels(10, 1), Size.pixels(10, 1) };
         link(root, c);
         cp.* = c;
     }
@@ -400,7 +394,7 @@ test "parent_pct child" {
     defer arena.deinit();
 
     const root = try make_box(&arena);
-    root.pref_size = .{ Size.cells(20, 1), Size.cells(10, 1) };
+    root.pref_size = .{ Size.pixels(20, 1), Size.pixels(10, 1) };
     root.child_layout_axis = .x;
 
     const child = try make_box(&arena);
@@ -418,7 +412,7 @@ test "children_sum parent" {
     defer arena.deinit();
 
     const root = try make_box(&arena);
-    root.pref_size = .{ Size.cells(100, 1), Size.cells(100, 1) };
+    root.pref_size = .{ Size.pixels(100, 1), Size.pixels(100, 1) };
     root.child_layout_axis = .y;
 
     const container = try make_box(&arena);
@@ -427,15 +421,15 @@ test "children_sum parent" {
     link(root, container);
 
     const c1 = try make_box(&arena);
-    c1.pref_size = .{ Size.cells(5, 1), Size.cells(8, 1) };
+    c1.pref_size = .{ Size.pixels(5, 1), Size.pixels(8, 1) };
     link(container, c1);
 
     const c2 = try make_box(&arena);
-    c2.pref_size = .{ Size.cells(10, 1), Size.cells(6, 1) };
+    c2.pref_size = .{ Size.pixels(10, 1), Size.pixels(6, 1) };
     link(container, c2);
 
     const c3 = try make_box(&arena);
-    c3.pref_size = .{ Size.cells(8, 1), Size.cells(4, 1) };
+    c3.pref_size = .{ Size.pixels(8, 1), Size.pixels(4, 1) };
     link(container, c3);
 
     layout(root, 100, 100);
@@ -449,15 +443,15 @@ test "overflow with strictness" {
     defer arena.deinit();
 
     const root = try make_box(&arena);
-    root.pref_size = .{ Size.cells(30, 1), Size.cells(10, 1) };
+    root.pref_size = .{ Size.pixels(30, 1), Size.pixels(10, 1) };
     root.child_layout_axis = .x;
 
     const strict = try make_box(&arena);
-    strict.pref_size = .{ Size.cells(20, 1), Size.cells(10, 1) };
+    strict.pref_size = .{ Size.pixels(20, 1), Size.pixels(10, 1) };
     link(root, strict);
 
     const flex = try make_box(&arena);
-    flex.pref_size = .{ Size.cells(20, 0), Size.cells(10, 1) };
+    flex.pref_size = .{ Size.pixels(20, 1), Size.pixels(10, 1) };
     link(root, flex);
 
     layout(root, 30, 10);
@@ -471,20 +465,20 @@ test "nested row inside column" {
     defer arena.deinit();
 
     const root = try make_box(&arena);
-    root.pref_size = .{ Size.cells(40, 1), Size.cells(20, 1) };
+    root.pref_size = .{ Size.pixels(40, 1), Size.pixels(20, 1) };
     root.child_layout_axis = .y;
 
     const row = try make_box(&arena);
-    row.pref_size = .{ Size.pct(1, 1), Size.cells(5, 1) };
+    row.pref_size = .{ Size.pct(1, 1), Size.pixels(5, 1) };
     row.child_layout_axis = .x;
     link(root, row);
 
     const left = try make_box(&arena);
-    left.pref_size = .{ Size.cells(20, 1), Size.pct(1, 1) };
+    left.pref_size = .{ Size.pixels(20, 1), Size.pct(1, 1) };
     link(row, left);
 
     const right = try make_box(&arena);
-    right.pref_size = .{ Size.cells(20, 1), Size.pct(1, 1) };
+    right.pref_size = .{ Size.pixels(20, 1), Size.pct(1, 1) };
     link(row, right);
 
     layout(root, 40, 20);
@@ -505,15 +499,15 @@ test "floating box uses fixed_position" {
     defer arena.deinit();
 
     const root = try make_box(&arena);
-    root.pref_size = .{ Size.cells(80, 1), Size.cells(24, 1) };
+    root.pref_size = .{ Size.pixels(80, 1), Size.pixels(24, 1) };
     root.child_layout_axis = .y;
 
     const normal = try make_box(&arena);
-    normal.pref_size = .{ Size.pct(1, 1), Size.cells(5, 1) };
+    normal.pref_size = .{ Size.pct(1, 1), Size.pixels(5, 1) };
     link(root, normal);
 
     const floating = try make_box(&arena);
-    floating.pref_size = .{ Size.cells(10, 1), Size.cells(3, 1) };
+    floating.pref_size = .{ Size.pixels(10, 1), Size.pixels(3, 1) };
     floating.flags.floating_x = true;
     floating.flags.floating_y = true;
     floating.fixed_position = .{ 30, 10 };
@@ -532,7 +526,7 @@ test "border insets reduce available space" {
     defer arena.deinit();
 
     const root = try make_box(&arena);
-    root.pref_size = .{ Size.cells(20, 1), Size.cells(10, 1) };
+    root.pref_size = .{ Size.pixels(20, 1), Size.pixels(10, 1) };
     root.child_layout_axis = .x;
     root.flags.draw_border = true;
     root.flags.draw_side_left = true;
@@ -557,7 +551,7 @@ test "text_content sizing" {
     defer arena.deinit();
 
     const root = try make_box(&arena);
-    root.pref_size = .{ Size.cells(80, 1), Size.cells(24, 1) };
+    root.pref_size = .{ Size.pixels(80, 1), Size.pixels(24, 1) };
     root.child_layout_axis = .y;
 
     const label = try make_box(&arena);
@@ -585,7 +579,7 @@ test "parent_pct child inside children_sum row fills sibling height" {
     //         button (cells 7x3)
 
     const root = try make_box(&arena);
-    root.pref_size = .{ Size.cells(80, 1), Size.cells(24, 1) };
+    root.pref_size = .{ Size.pixels(80, 1), Size.pixels(24, 1) };
     root.child_layout_axis = .y;
 
     const panel = try make_box(&arena);
@@ -604,7 +598,7 @@ test "parent_pct child inside children_sum row fills sibling height" {
     link(row, label);
 
     const button = try make_box(&arena);
-    button.pref_size = .{ Size.cells(7, 1), Size.cells(3, 1) };
+    button.pref_size = .{ Size.pixels(7, 1), Size.pixels(3, 1) };
     link(row, button);
 
     layout(root, 80, 24);
