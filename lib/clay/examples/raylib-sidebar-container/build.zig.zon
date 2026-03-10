@@ -1,0 +1,21 @@
+.{
+    .name = .clay_sidebar_example,
+    .version = "0.0.0",
+    .dependencies = .{
+        .zclay = .{
+            .path = "../../",
+        },
+        .raylib_zig = .{
+            .url = "git+https://github.com/johan0A/raylib-zig#114f58b88ff6a91f9a14f65143c5a3fe16f27f04",
+            .hash = "raylib_zig-5.6.0-dev-KE8REA06BQDyMKul7WIKUSQxbhooGGKyC6xlpJ6-ATkr",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "LICENSE",
+        "README.md",
+    },
+    .fingerprint = 0x934a5243274e06bb,
+}
